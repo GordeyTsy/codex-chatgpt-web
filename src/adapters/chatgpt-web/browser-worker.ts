@@ -1,3 +1,4 @@
+import { installAutolinkRenderCompatibility } from "./autolink-render-compat";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -205,6 +206,15 @@ function chatGptModelControlUnavailableAdapterError(diagnostic: string, detail?:
       retryable: false,
       cause: new Error(diagnostic),
     },
+  );
+}
+
+export function chatGptRequestedModeUnavailableError(label: string, detail?: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `ChatGPT currently does not offer the requested ${label} mode in its model picker. `
+    + `The selected model was not changed. Choose an available WEB model or retry when ${label} becomes available.`
+    + (detail ? ` ChatGPT: ${detail}` : ""),
+    { status: 409, errorType: "model_unavailable", code: "chatgpt_model_unavailable", retryable: false },
   );
 }
 
@@ -2079,7 +2089,7 @@ export function chatGptPromptFilePayloads(
  * exactly where the user put it; only a missing or foreign one is replaced, and always with a
  * position inside this composer, so an insert can never land in another element.
  */
-export function insertPlainTextIntoComposer(element: HTMLElement, value: string): boolean {
+export async function insertPlainTextIntoComposer(element: HTMLElement, value: string): Promise<boolean> {
   if (document.activeElement !== element) element.focus();
   if (document.activeElement !== element) return false;
   const selection = window.getSelection();
@@ -2101,7 +2111,78 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
   ) {
     return false;
   }
-  return document.execCommand("insertText", false, value);
+  // Chromium's native insertText edits each newline separately. A 10 KiB / 900-line
+  // prompt spent 11.4 seconds inside execCommand; 64 Ki UTF-16 chunks still stalled
+  // for >120 seconds. For the observed ProseMirror editor, replace only the affected
+  // paragraph in one DOM mutation. Its DOMObserver imports this as an editor change.
+  // Replacing a block (rather than an inline text node) is important: inline parsing
+  // collapses literal newlines. Keep the prefix, suffix, inline connector and caret.
+  const chunkSize = 64 * 1024; // UTF-16 code units, not UTF-8 bytes.
+  const multiline = value.split("\n", 34).length > 33;
+  if (value.length <= chunkSize && !multiline) {
+    return document.execCommand("insertText", false, value);
+  }
+  if (element.classList?.contains("ProseMirror") && selection.rangeCount === 1) {
+    const caret = selection.getRangeAt(0).cloneRange();
+    if (caret.startContainer === element) {
+      const paragraph = element.childNodes[Math.max(0, caret.startOffset - 1)];
+      if (paragraph instanceof HTMLElement && paragraph.tagName === "P") {
+        const atStart = caret.startOffset === 0;
+        caret.selectNodeContents(paragraph);
+        caret.collapse(atStart);
+      }
+    }
+    let block: Node | null = caret.startContainer;
+    while (block && block.parentNode !== element) block = block.parentNode;
+    if (block instanceof HTMLElement && block.tagName === "P") {
+      const path: number[] = [];
+      for (let node = caret.startContainer; node !== block; node = node.parentNode!) {
+        path.unshift(Array.prototype.indexOf.call(node.parentNode!.childNodes, node));
+      }
+      const replacement = block.cloneNode(true) as HTMLElement;
+      replacement.style.whiteSpace = "pre-wrap";
+      let anchor: Node = replacement;
+      for (const index of path) anchor = anchor.childNodes[index]!;
+      const insertion = document.createRange();
+      insertion.setStart(anchor, caret.startOffset);
+      insertion.collapse(true);
+      const textNode = document.createTextNode(value);
+      insertion.insertNode(textNode);
+      replacement.querySelectorAll("br.ProseMirror-trailingBreak").forEach(node => node.remove());
+      block.replaceWith(replacement);
+      insertion.setStartAfter(textNode);
+      insertion.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(insertion);
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true, inputType: "insertText", data: null,
+      }));
+      // A task boundary lets the editor's DOMObserver reconcile before readback/send.
+      // Unlike requestAnimationFrame, it also progresses on a hidden surface.
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      return true;
+    }
+  }
+  // Unknown editor/paragraph structure: keep native editing, but bound both line
+  // count and UTF-16 length. Never split a surrogate pair across native edits.
+  for (let offset = 0; offset < value.length;) {
+    if (document.activeElement !== element || !selection.anchorNode
+      || !element.contains(selection.anchorNode)) return false;
+    let end = Math.min(offset + chunkSize, value.length);
+    let newline = offset;
+    for (let line = 0; line < 32; line++) {
+      newline = value.indexOf("\n", newline);
+      if (newline < 0 || newline >= end) break;
+      newline += 1;
+      if (line === 31) end = newline;
+    }
+    if (end < value.length && /[\uD800-\uDBFF]/.test(value[end - 1]!)
+      && /[\uDC00-\uDFFF]/.test(value[end]!)) end -= 1;
+    if (!document.execCommand("insertText", false, value.slice(offset, end))) return false;
+    offset = end;
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+  return true;
 }
 
 export class ChatGptBrowserWorker {
@@ -2455,19 +2536,14 @@ export class ChatGptBrowserWorker {
         "ChatGPT effort slider exposed an invalid ARIA range",
       );
     }
+    console.info(`[chatgpt-web] model-selection requested=${mode.displayLabel} index=${uiEffortIndex}`
+      + ` range=${sliderState.min}..${sliderState.max} current=${sliderState.value}`);
     const targetValue = sliderState.min + uiEffortIndex;
     if (targetValue > sliderState.max) {
       const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(activation.menu) : undefined;
-      const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
-        ? " If you have made many Pro requests recently, ChatGPT may have temporarily hidden Pro because you reached its usage limit."
-        : "";
-      throw chatGptModelControlUnavailableAdapterError(
-        `ChatGPT effort slider does not expose item index ${uiEffortIndex}`
-        + ` (min=${sliderState.min}; max=${sliderState.max})`
-        + proUsageLimitHint,
-        detail,
-      );
+      throw chatGptRequestedModeUnavailableError(mode.displayLabel, detail);
     }
+
     const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
     while (sliderState.value !== targetValue) {
       await throwIfChatGptRateLimitDialog(page);
@@ -3306,7 +3382,7 @@ export class ChatGptBrowserWorker {
     try {
       if (connectorMode !== "mention") {
         const composer = await this.activeComposer(page, 30_000, abortSignal);
-        // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
+        // Playwright's multiline fill maps through an input action that ChatGPT's contenteditable editor can
         // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
         // then transport the complete text through the browser's plain-text editing command.
         composerMutationStarted = true;
@@ -3640,7 +3716,7 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     const composer = await this.activeComposer(page, 30_000, abortSignal);
     await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
-    // CDP Input.insertText is interpreted as live typing by ChatGPT's Lexical plugins. On a large
+    // CDP Input.insertText is interpreted as live typing by the editor's live-typing plugins. On a large
     // JSON transport it can turn literal Markdown backticks into rich code nodes, remove the
     // delimiters from textContent, and leave the next insertion outside the intended block. The
     // browser's plain-text editing command updates the same focused contenteditable atomically
@@ -4384,6 +4460,7 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    let releaseRenderCompatibility: (() => Promise<void>) | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       // Validate only the selected physical message, not canonical history used for usage estimates.
@@ -4479,6 +4556,10 @@ export class ChatGptBrowserWorker {
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
+      releaseRenderCompatibility = await this.runStage(
+        turn.traceId, "renderer_compatibility", browserStageTimeouts.browserPage,
+        () => installAutolinkRenderCompatibility(page),
+      );
       const rebindLauncherPage = async (
         attempt: number,
         cause: Error,
@@ -4605,6 +4686,14 @@ export class ChatGptBrowserWorker {
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
+      // Validate the final requested model BEFORE uploading any multipart stages.
+      // Staging Instant availability does not prove that the requested Pro exists.
+      if (multipartStages && stagingMode.effort !== requestedMode.effort) {
+        await this.runStage(turn.traceId, "requested_model_preflight", browserStageTimeouts.effortSelection, () => (
+          this.selectModelAndEffort(page, turn.modelId, requestedMode.effort, browserCapabilities,
+            checkpoint => diagnostics.capture(page, `preflight-${checkpoint}`))
+        ));
+      }
       let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
         this.selectModelAndEffort(
           page,
@@ -4759,6 +4848,8 @@ export class ChatGptBrowserWorker {
             "connector_catalog_refresh",
             browserStageTimeouts.temporaryChatPreparation,
             async () => {
+              await releaseRenderCompatibility?.();
+              releaseRenderCompatibility = await installAutolinkRenderCompatibility(page, { nextDocument: true });
               await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
               await this.prepareTemporaryChatSurface(
                 page,
@@ -5131,6 +5222,9 @@ export class ChatGptBrowserWorker {
       }
       throw error;
     } finally {
+      if (releaseRenderCompatibility) {
+        await withChatGptBrowserObservationTimeout(releaseRenderCompatibility(), 5_000).catch(() => {});
+      }
       prepared.release();
       if (turnConnection) {
         await turnConnection.close().catch(error => {

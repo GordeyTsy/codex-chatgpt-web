@@ -50,38 +50,38 @@ function harness(options: {
   return { composer: composer as unknown as HTMLElement, calls, selection, fakeDocument };
 }
 
-test("places the caret itself when focus has not yet produced one in the composer", () => {
+test("places the caret itself when focus has not yet produced one in the composer", async () => {
   // A focusable composer may be ready before the browser has placed a caret inside it.
   const { composer, calls, selection } = harness({ focusable: true, caretInsideComposer: false });
 
-  expect(insertPlainTextIntoComposer(composer, "staged part")).toBeTrue();
+  expect(await insertPlainTextIntoComposer(composer, "staged part")).toBeTrue();
   expect(calls).toEqual([{ command: "insertText", value: "staged part" }]);
   expect(selection.isCollapsed).toBeTrue();
 });
 
-test("leaves an existing caret inside the composer exactly where it is", () => {
+test("leaves an existing caret inside the composer exactly where it is", async () => {
   const { composer, calls, selection } = harness({ focusable: true, caretInsideComposer: true });
   const anchorBefore = selection.anchorNode;
 
-  expect(insertPlainTextIntoComposer(composer, "second part")).toBeTrue();
+  expect(await insertPlainTextIntoComposer(composer, "second part")).toBeTrue();
   expect(selection.anchorNode).toBe(anchorBefore);
   expect(calls).toEqual([{ command: "insertText", value: "second part" }]);
 });
 
-test("refuses to insert when the composer cannot take focus at all", () => {
+test("refuses to insert when the composer cannot take focus at all", async () => {
   // A covered or detached composer must still fail rather than have text typed somewhere else.
   const { composer, calls } = harness({ focusable: false, caretInsideComposer: false });
 
-  expect(insertPlainTextIntoComposer(composer, "staged part")).toBeFalse();
+  expect(await insertPlainTextIntoComposer(composer, "staged part")).toBeFalse();
   expect(calls).toEqual([]);
 });
 
-test("reports a genuinely rejected edit as a failure", () => {
+test("reports a genuinely rejected edit as a failure", async () => {
   const { composer } = harness({
     focusable: true,
     caretInsideComposer: true,
     execCommandResult: false,
   });
 
-  expect(insertPlainTextIntoComposer(composer, "staged part")).toBeFalse();
+  expect(await insertPlainTextIntoComposer(composer, "staged part")).toBeFalse();
 });

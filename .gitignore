@@ -17,3 +17,8 @@ launcher/artifacts/
 .playwright-cli/
 output/
 notes.md
+
+# Local packaging tools and reproducible diagnostic artifacts
+.build-tools/
+artifacts/
+scripts/.large-message-probe.node.mjs
