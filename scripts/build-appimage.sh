@@ -36,7 +36,7 @@ import sys,json,hashlib,pathlib,subprocess
 p=pathlib.Path(sys.argv[1]);root=pathlib.Path.cwd()
 files=subprocess.check_output(['git','ls-files','-c','-m','-o','--exclude-standard'],text=True).splitlines()
 files=sorted(set(f for f in files if f.startswith(('src/','launcher/electron/','scripts/','tests/')) and pathlib.Path(f).is_file()))
-manifest={'artifact':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'baseCommit':sys.argv[2],'dirty':True,'sourceSha256':{f:hashlib.sha256(pathlib.Path(f).read_bytes()).hexdigest() for f in files},'verification':'core tests, launcher tests, typechecks, package smoke; see artifacts/large-message-freeze/build'}
+manifest={'artifact':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'baseCommit':sys.argv[2],'dirty':bool(subprocess.check_output(['git','status','--porcelain'],text=True).strip()),'sourceSha256':{f:hashlib.sha256(pathlib.Path(f).read_bytes()).hexdigest() for f in files},'verification':'core tests, launcher tests, typechecks, package smoke; see artifacts/large-message-freeze/build'}
 p.with_suffix('.build.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY
 printf '%s\n' "$artifact" > "$output/latest.txt"

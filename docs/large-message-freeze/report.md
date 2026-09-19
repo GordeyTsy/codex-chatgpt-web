@@ -17,7 +17,7 @@ Primary upstream algorithm: [micromark GFM autolink syntax](https://github.com/m
 
 ## New-task failures
 
-Three recent failures requested **Pro**, while the live picker exposed slider `0..3` and a Pro item with `aria-disabled=true`. Two multipart tasks staged content in Instant and failed when switching to their requested Pro; another failed before insertion. The live observation did not yield a linked explanation of why Pro was disabled. A usage-limit cause is therefore not confirmed.
+Three recent failures requested **Pro**, while the live picker exposed slider `0..3` and a Pro item with `aria-disabled=true`. Two multipart tasks staged content in Instant and failed when switching to their requested Pro; another failed before insertion. The live observation did not yield a linked explanation of why Pro was disabled. The user subsequently confirmed that the Pro quota was exhausted. This was normal service behavior, not a broken Pro selector. The actionable error and preflight remain useful without bypassing that restriction.
 
 A new Codex CLI session explicitly using `chatgpt-web/light`, effort `low`, successfully returned `WEB_INSTANT_OK` (Markdown-escaped in the CLI output). Session: `01a0b6b0-e707-7be1-9906-11c5ca1f8459`. No automatic model downgrade was introduced.
 
@@ -97,3 +97,12 @@ PATH="$PWD/.build-tools/bin:$PATH" bun scripts/test-large-message-local.mjs --st
 It attempts 30 cycles × 2 hidden sandboxed windows, 60 insertions total, 120000 UTF-16 units of Cyrillic/emoji/newlines each, 180-second external deadline, records process RSS and verifies exact text. It is a synthetic mechanism test, not a service end-to-end test.
 
 Raw results: `/home/gt/projects/my-sorted/codex-chatgpt-web/artifacts/large-message-freeze/`, including `baseline-matrix`, `after-matrix`, `profile-post-send`, `combined-source`, `new-task-failure`, build logs and CPU profiles. No cookies or authentication headers are included in committed test fixtures/report.
+
+
+## Upstream synchronization (2026-09-19)
+
+Merged upstream `cea5e1c` and `eaf4f09` while retaining the fork's insertion implementation and autolink compatibility module byte-for-byte. Upstream adds nonretryable account cooldowns, persistent model-selection checks, owned HTTP 413 classification, native environment/setup recovery, and six-part Bigger Context transport when that feature is enabled. Its context multiplier stays at three; transport parts do not imply a larger model context window.
+
+The user confirmed exhausted Pro quota, so inability to select Pro was expected service behavior. The fork retains actionable errors and preflight before any staging submission, without fallback or quota bypass. Updated upstream recovery-order fixtures now include that preflight; an additional regression verifies unavailable Pro causes zero staging sends and releases resources.
+
+No account-bound tests are run during synchronization. A focused upstream PR is prepared separately with only autolink compatibility and its regression tests; the experimental insertion changes and local investigation files are excluded. The synchronized source does not resolve the earlier insertion-integrity matrix, and no new claim of complete real-service validation is made.
