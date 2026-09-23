@@ -106,3 +106,47 @@ Merged upstream `cea5e1c` and `eaf4f09` while retaining the fork's insertion imp
 The user confirmed exhausted Pro quota, so inability to select Pro was expected service behavior. The fork retains actionable errors and preflight before any staging submission, without fallback or quota bypass. Updated upstream recovery-order fixtures now include that preflight; an additional regression verifies unavailable Pro causes zero staging sends and releases resources.
 
 No account-bound tests are run during synchronization. A focused upstream PR is prepared separately with only autolink compatibility and its regression tests; the experimental insertion changes and local investigation files are excluded. The synchronized source does not resolve the earlier insertion-integrity matrix, and no new claim of complete real-service validation is made.
+
+## v6.0.0 review and fork synchronization (2026-09-24)
+
+The installed and running official runtime is v6.0.0, bundle ID
+`802690f42965b3fbb2b31f58a52de7d5e24840634e36f37472404470d9ad53d8`.
+The official `v6.0.0` tag is `212ceef`; upstream main additionally contains
+`7579422` (localized controls and hook ownership). Neither contains the fork's
+email-autolink optimization or another change to that site's tokenizer. The
+release's Markdown changes concern answer extraction, not the measured site-side
+email-candidate event-history scan. The installed runtime contains neither our
+compatibility marker nor its initialization message.
+
+Merged upstream main while retaining the autolink compatibility implementation
+unchanged. Resolved the model-picker availability check and combined upstream
+usage tracking with compatibility cleanup. The preflight preserves the requested
+model family. Updated two isolated test fixtures for the renamed chat preparation
+method and the compatibility initialization step.
+
+Only local tests were run. No ChatGPT messages were sent and no account-bound
+browser matrix was run. Frozen parser fixtures were rendered in a separate,
+sandboxed Electron window with an external timeout. The adverse input is an
+open Markdown link label containing repeated `word **bold**` runs, exercising
+failed email attempts while link-label history remains open. Three runs per size:
+
+| Input bytes | Original median (range), ms | Patched median (range), ms |
+|---:|---:|---:|
+| 12627 | 98.5 (75.6–113.8) | 66.1 (48.0–66.7) |
+| 25227 | 374.6 (374.1–468.0) | 161.2 (134.9–193.2) |
+| 50427 | 2189.3 (1755.2–2847.5) | 816.5 (599.3–1031.2) |
+
+Complete HTML matched in all nine runs. A separate escaped-JSON control did not
+show consistent improvement; it did not recreate the adverse open-label history.
+A preliminary Node/Bun large-label benchmark hit its 55-second external deadline
+and is not a completed comparison. These measurements concern frozen local
+fixtures, not current ChatGPT assets or a v6.0.0 end-to-end submission. Therefore
+this review establishes absence of an application-side fix in the release and
+continued value of the preserved workaround for its recognized parser, but does
+not prove that today's ChatGPT site still serves the affected bundle. The
+maintainer's objection to reliance on private site internals remains valid.
+
+Validation: frozen-lockfile install, typecheck, and 142 tests across autolink,
+browser-worker contract and compaction/browser recovery passed (1151 assertions).
+Raw measurements and local runners: `artifacts/large-message-freeze/v6-review/`.
+The installed official application was not replaced during this fork sync.
