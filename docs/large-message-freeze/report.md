@@ -150,3 +150,47 @@ Validation: frozen-lockfile install, typecheck, and 142 tests across autolink,
 browser-worker contract and compaction/browser recovery passed (1151 assertions).
 Raw measurements and local runners: `artifacts/large-message-freeze/v6-review/`.
 The installed official application was not replaced during this fork sync.
+
+## Current site regression (2026-09-24)
+
+After installing the synchronized 6.0.0 build, the real launcher logged four
+`tokenizer signature not recognized` events. The current loaded site asset
+`conversation-small-ab2gxn0wnfhjaqoy.js` was retrieved with CDP from the existing
+page, without sending a message. Its email tokenizer still calls the expensive
+history guard, now named `$3e`. Our original `\w+` identifier matcher rejected
+that valid JavaScript name. Therefore the workaround was present in the installed
+runtime but skipped this site version.
+
+The matcher now allows dollar identifiers, escapes captured identifiers when
+constructing regexes, and uses replacement callbacks to preserve literal dollar
+characters. The initialization hook's declaration matcher accepts the same names.
+Unknown/ambiguous bundles still remain unchanged. Two regressions cover a real
+parser renamed to a dollar identifier and dollar identifiers in every captured
+binding. All five parser tests pass, including full HTML differential cases.
+
+A sandboxed local Electron/CDP test extracted the exact current email tokenizer,
+its history guard and two character predicates. A small ASCII predicate supplied
+the otherwise imported character helper. It exercises growing open-label event
+history with non-email candidates; this is a mechanism test, not a full Markdown
+or real-service request. The actual debugger initialization hook was used. Three
+runs each produced these medians:
+
+| Candidates | Before event-property checks | Before ms | After checks | After ms |
+|---:|---:|---:|---:|---:|
+| 1000 | 2002000 | 44.2 | 0 | 2.3 |
+| 2000 | 8004000 | 174.5 | 0 | 1.6 |
+| 4000 | 32008000 | 754.2 | 0 | 5.9 |
+
+An initial local harness placed a function declaration before the first executable
+statement; its breakpoint applied after the function reference had been captured.
+That run did not improve performance and was excluded. The corrected fixture has
+an executable module prologue before tokenizer registration, matching the intended
+production initialization order. A separate real-page initialization check is
+recorded in the raw artifacts.
+
+The observed model-picker and staging acknowledgement delays are not independently
+proven defects. One blocked renderer may delay other pages; historical process
+ownership was not recorded, so that propagation remains unconfirmed. No model
+selection change or automatic resend was added.
+
+Raw evidence and runners: `artifacts/large-message-freeze/current-site/`.

@@ -52,3 +52,25 @@ test("large link-label failure path keeps the full output", () => {
   const value = "[" + "word **bold** ".repeat(1800) + "](https://example.invalid)";
   expect(optimized(value)).toBe(original(value));
 }, 20_000);
+
+test("recognizes dollar identifiers used by current site minification", async () => {
+  const guard = /\|\|(\w+)\(\w+\.events\)/.exec(bundled);
+  expect(guard).not.toBeNull();
+  const renamed = bundled.replace(new RegExp(`\\b${guard![1]}\\b`, "g"), () => "$history");
+  const patched = patchAutolinkEmailCheck(renamed);
+  expect(patched.patched).toBeTrue();
+  expect(patchAutolinkEmailCheck(patched.source).patched).toBeFalse();
+  writeFileSync(join(fixtureDir, "dollar.mjs"), patched.source);
+  const render = (await import(join(fixtureDir, "dollar.mjs"))).render;
+  for (const value of ["hello@example.com", "[word **bold** ".repeat(100), "Кириллица 😀 [a@b.test](https://example.invalid)"]) {
+    expect(render(value)).toBe(original(value));
+  }
+});
+
+test("escapes dollar signs in captured tokenizer bindings", () => {
+  const source = 'function $email($e,$ok,$no){let $self=this,$a,$b;return $start;function $start($c){return !$char($c)||$history($self.events)?$no($c):($e.enter(`literalAutolink`),$e.enter(`literalAutolinkEmail`),$next($c))}function $next($c){return $c===64?$ok($c):$no($c)}}function $history(e){return e.some(t=>t._gfmAutolinkLiteralWalkedInto)}';
+  const result = patchAutolinkEmailCheck(source);
+  expect(result.patched).toBeTrue();
+  expect(result.source).toContain("!$history($self.events.slice(0,__codexEmailEvents))");
+  expect(() => new Function(result.source)).not.toThrow();
+});

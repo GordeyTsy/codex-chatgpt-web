@@ -11,7 +11,7 @@ import type { Page } from "playwright-core";
  * Upstream algorithm: micromark-extension-gfm-autolink-literal/lib/syntax.js.
  */
 export function patchAutolinkEmailCheck(source: string): { source: string; patched: boolean } {
-  const starts = /function (\w+)\((\w+),(\w+),(\w+)\)\{let (\w+)=this,(\w+),(\w+);return (\w+);/g;
+  const starts = /function ([\w$]+)\(([\w$]+),([\w$]+),([\w$]+)\)\{let ([\w$]+)=this,([\w$]+),([\w$]+);return ([\w$]+);/g;
   const candidates: Array<{ start: number; end: number; replacement: string }> = [];
   for (const match of source.matchAll(starts)) {
     const start = match.index!;
@@ -30,22 +30,23 @@ export function patchAutolinkEmailCheck(source: string): { source: string; patch
     if (depth !== 0) continue;
     const body = source.slice(start, end);
     const [, , effects, , nok, self, , , entry] = match;
-    if (!new RegExp(`${effects}\\.enter\\([\\x60'"]literalAutolinkEmail[\\x60'"]\\)`).test(body)
+    const reId = (name: string) => name.replaceAll("$", "\\$");
+    if (!new RegExp(`${reId(effects!)}\\.enter\\([\\x60'"]literalAutolinkEmail[\\x60'"]\\)`).test(body)
       || body.includes("__codexEmailEvents") || body.includes("${")) continue;
-    const guard = new RegExp(`\\|\\|(\\w+)\\(${self}\\.events\\)`).exec(body);
-    const entryHeader = new RegExp(`function ${entry}\\((\\w+)\\)`).exec(body);
+    const guard = new RegExp(`\\|\\|([\\w$]+)\\(${reId(self!)}\\.events\\)`).exec(body);
+    const entryHeader = new RegExp(`function ${reId(entry!)}\\(([\\w$]+)\\)`).exec(body);
     if (!guard || !entryHeader) continue;
     const previous = guard[1]!;
     const code = entryHeader[1]!;
     if (!source.includes(`function ${previous}(`) || !source.includes("_gfmAutolinkLiteralWalkedInto")) continue;
-    const enter = new RegExp(`${effects}\\.enter\\([\\x60'"]literalAutolink[\\x60'"]\\)`).exec(body)?.[0];
-    const at = new RegExp(`${code}===(?:64|\\w+\\.atSign)`).exec(body)?.[0];
+    const enter = new RegExp(`${reId(effects!)}\\.enter\\([\\x60'"]literalAutolink[\\x60'"]\\)`).exec(body)?.[0];
+    const at = new RegExp(`${reId(code!)}===(?:64|[\\w$]+\\.atSign)`).exec(body)?.[0];
     if (!enter || !at) continue;
     const replacement = body
-      .replace(`;return ${entry};`, `;let __codexEmailEvents;return ${entry};`)
+      .replace(`;return ${entry};`, () => `;let __codexEmailEvents;return ${entry};`)
       .replace(guard[0], "")
-      .replace(enter, `__codexEmailEvents=${self}.events.length,${enter}`)
-      .replace(at, `${at}&&!${previous}(${self}.events.slice(0,__codexEmailEvents))`);
+      .replace(enter, () => `__codexEmailEvents=${self}.events.length,${enter}`)
+      .replace(at, () => `${at}&&!${previous}(${self}.events.slice(0,__codexEmailEvents))`);
     candidates.push({ start, end, replacement });
   }
   if (candidates.length !== 1) return { source, patched: false };
@@ -87,7 +88,7 @@ export async function installAutolinkRenderCompatibility(
         // and initialize that module-local binding before the module registers it.
         let prefix = 0; while (prefix < scriptSource.length && scriptSource[prefix] === changed.source[prefix]) prefix++;
         const functionStart = scriptSource.lastIndexOf("function ", prefix);
-        const header = /^function (\w+)\(/.exec(scriptSource.slice(functionStart));
+        const header = /^function ([\w$]+)\(/.exec(scriptSource.slice(functionStart));
         // The changed declaration contains nested functions; find its balanced end.
         let depth = 0, quote = "", end = changed.source.indexOf("{", functionStart);
         for (; end < changed.source.length; end++) {
