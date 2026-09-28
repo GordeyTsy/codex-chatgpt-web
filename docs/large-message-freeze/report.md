@@ -194,3 +194,21 @@ ownership was not recorded, so that propagation remains unconfirmed. No model
 selection change or automatic resend was added.
 
 Raw evidence and runners: `artifacts/large-message-freeze/current-site/`.
+
+## Upstream 6.1.3 synchronization (2026-09-28)
+
+Merged official release `v6.1.3` / `fa2d2c6c24926078b46eedb2186f69f2e8d548d7`
+into the fork. This includes the 6.1.x support for updated ChatGPT composers,
+model controls, activity/reply DOM, account/session recovery and connector handling.
+The autolink compatibility module and its dollar-identifier regressions are
+unchanged from `01f744e`. Its setup, recovery and cleanup remain wired into the
+browser worker. The large/multiline insertion implementation and requested-model
+preflight remain present.
+
+The model-picker merge uses upstream's new availability snapshot and revalidation,
+while preserving the fork's nonretryable unavailable-model error. Both projects'
+ignore rules are retained. Validation uses local fixtures and the existing build,
+package-smoke and installation scripts; no real ChatGPT requests are needed for
+this release sync. These checks do not establish a new large-message service
+end-to-end result. Version-specific diagnostics are stored under
+`artifacts/large-message-freeze/v6.1.3/`.
