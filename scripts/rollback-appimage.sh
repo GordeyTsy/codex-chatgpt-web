@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+command -v setsid >/dev/null || { echo "setsid is required to detach the application from the installer" >&2; exit 1; }
 root=$(cd "$(dirname "$0")/.." && pwd)
 state="$HOME/.local/state/codex-web-gpt-appimage/previous.json"
 mapfile -t paths < <(python3 - "$state" <<'PY'
@@ -14,7 +15,7 @@ python3 "$root/scripts/stop-owned-appimage.py" "$target"
 cp -p -- "$target" "$target.before-rollback-$(date -u +%Y%m%dT%H%M%SZ)"
 install -m 755 -- "$backup" "$target.new"
 mv -f -- "$target.new" "$target"
-nohup "$HOME/.local/bin/codex-web-gpt" > "${state%/*}/rollback-launch.log" 2>&1 < /dev/null &
+nohup setsid "$HOME/.local/bin/codex-web-gpt" > "${state%/*}/rollback-launch.log" 2>&1 < /dev/null &
 pid=$!
 sleep 8
 kill -0 "$pid"

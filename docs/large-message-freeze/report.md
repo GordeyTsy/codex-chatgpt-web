@@ -212,3 +212,24 @@ package-smoke and installation scripts; no real ChatGPT requests are needed for
 this release sync. These checks do not establish a new large-message service
 end-to-end result. Version-specific diagnostics are stored under
 `artifacts/large-message-freeze/v6.1.3/`.
+
+6.1.3 build validation completed: 812 core tests passed, 22 skipped; 363 launcher
+tests passed, one skipped; both typechecks, local insertion regression and packaged
+AppImage smoke passed. Optional real-Chromium tests use local HTML/network fixtures:
+model picker, response binding and limits cases passed after rerunning the Pro
+case whose first run was cut off by the external overall deadline. The 5000-line
+connector fixture exceeded its 45-second limit; the first insertion took about
+38 seconds with the fork and 42 seconds with upstream's original insert function
+in diagnostic runs. Both extended four-case runs also exceeded 130 seconds.
+These are individual observations, not controlled performance statistics. The
+same exact-text, stale-draft and old/new connector checks with 100 lines passed.
+The optional large generic-contenteditable case is not claimed fixed or passing.
+
+The initial packaging download of pinned libnotify stalled; a fresh download
+matched its required SHA-256. Packaging resumed after already-passed tests using
+`artifacts/large-message-freeze/v6.1.3/resume-packaging.sh`. The installed artifact
+was built from merge commit `b9d94e0`. Installation and rollback helpers now detach
+the launch with `setsid`: a background process that survived the installer's own
+8-second check did not survive the calling command's process-group teardown.
+A separately detached launch was verified again from a later command. This helper
+change does not alter the AppImage payload. No real ChatGPT messages were sent.

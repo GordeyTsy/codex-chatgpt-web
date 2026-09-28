@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+command -v setsid >/dev/null || { echo "setsid is required to detach the application from the installer" >&2; exit 1; }
 root=$(cd "$(dirname "$0")/.." && pwd)
 source_image=${1:-$(cat "$root/artifacts/appimage/latest.txt")}
 source_image=$(realpath "$source_image")
@@ -36,7 +37,7 @@ import json,sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps(dict(zip(('target','backup','source'),sys.argv[2:])),indent=2)+'\n')
 PY
-nohup "$HOME/.local/bin/codex-web-gpt" > "$scratch/launch.log" 2>&1 < /dev/null &
+nohup setsid "$HOME/.local/bin/codex-web-gpt" > "$scratch/launch.log" 2>&1 < /dev/null &
 pid=$!
 sleep 8
 if ! kill -0 "$pid" 2>/dev/null; then
