@@ -2679,7 +2679,9 @@ describe("ChatGPT outer-native harness v4", () => {
       const listed = await client.listTools();
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
         "codex_apply_patch",
+        "codex_custom_action",
         "codex_exec",
+        "codex_report_failure",
         "codex_tool_call",
         "codex_tool_inventory",
         "codex_view_image",
@@ -2696,7 +2698,7 @@ describe("ChatGPT outer-native harness v4", () => {
       // ChatGPT caches the complete tools/list contract under a connector identity.
       // An intentional hash change therefore requires an explicit connector refresh or identity migration.
       expect(createHash("sha256").update(canonicalJson(publicConnectorAbi)).digest("hex"))
-        .toBe("f4c9b6d6cf5822028f139aa33749ea4d9f834d4f8ea27359b404a17ca93d068a");
+        .toBe("5336d9edea3f1da1aa47dc5e25c30c5cdecdd7d5395a373c4e33f88a71893a73");
       expect(listed.tools.find(tool => tool.name === "codex_tool_call")?.description)
         .toContain("reserved codex.control.compaction_handoff operation, which is not listed by inventory");
       for (const tool of listed.tools) {
