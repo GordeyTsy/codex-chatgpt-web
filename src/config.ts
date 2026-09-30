@@ -125,6 +125,8 @@ export interface AppConfig {
   zeroRiskProEnabled: boolean;
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
+  /** Optional private inventory of trusted loopback model routes. */
+  externalRoutesPath?: string;
   autoApproveToolCalls: boolean;
   controlToken: string;
   runtimeCommand: string[];
@@ -540,6 +542,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.stallTimeoutSec !== undefined
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
     throw new Error(`Invalid stallTimeoutSec in ${path}`);
+  }
+  if (parsed.externalRoutesPath !== undefined
+    && (typeof parsed.externalRoutesPath !== "string" || !parsed.externalRoutesPath.trim()
+      || !isAbsolute(expandUserPath(parsed.externalRoutesPath)))) {
+    throw new Error(`Invalid externalRoutesPath in ${path}`);
   }
   const solAvailable = parsed.solAvailable !== false;
   const proAvailable = parsed.proAvailable === true;

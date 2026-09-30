@@ -23,6 +23,7 @@ import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
+import { appendExternalModels, externalResponseRequest } from "./external-routes";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import {
   readCodexModelContextOverride,
@@ -420,7 +421,7 @@ export async function modelsRequest(
   }
   let catalog: Record<string, unknown>;
   try {
-    catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
+    catalog = appendExternalModels(augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.()), config);
   } catch (error) {
     onFailure?.(modelCatalogFailure("catalog", error));
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
@@ -506,6 +507,8 @@ export async function responseRequest(
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+    const external = await externalResponseRequest(nativeRequest, config, raw);
+    if (external) return external;
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -738,6 +741,8 @@ export async function compactRequest(
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
   if (!isChatGptWebModelSlug(raw.model)) {
+    const external = await externalResponseRequest(nativeRequest, config, raw, true);
+    if (external) return external;
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
