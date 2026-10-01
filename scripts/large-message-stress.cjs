@@ -1,17 +1,21 @@
 // Local Chromium stress test: no network, no ChatGPT service claims.
 const {app,BrowserWindow}=require('electron');
 const fs=require('node:fs');
+// Keep the process alive while sampling renderer cleanup after the last fixture
+// closes; the default Linux exit would otherwise omit the result entirely.
+app.on('window-all-closed',()=>{});
 app.whenReady().then(async()=>{
  const windows=[];const started=Date.now();const samples=[];
  try{
-  const insert=fs.readFileSync(process.argv[2],'utf8');
+  const insert=fs.readFileSync(process.argv.at(-2),'utf8');
+  const read=fs.readFileSync(process.argv.at(-1),'utf8');
   for(let i=0;i<2;i++){const w=new BrowserWindow({show:false,webPreferences:{sandbox:true,backgroundThrottling:false}});windows.push(w);await w.loadURL('data:text/html,<body></body>');}
   for(let cycle=0;cycle<30;cycle++){
    const results=await Promise.all(windows.map(w=>w.webContents.executeJavaScript(`(async()=>{
     document.body.innerHTML='<div class="ProseMirror" contenteditable="true"><p><br class="ProseMirror-trailingBreak"></p></div>';
     const e=document.querySelector('div');e.focus();const text=('Тест 😀\\n').repeat(15000);
     const start=performance.now();const ok=await (${insert})(e,text);
-    if(!ok||e.textContent!==text)throw Error('insertion integrity');
+    if(!ok||(${read})(e)!==text)throw Error('insertion integrity');
     return {hidden:document.hidden,units:text.length,ms:performance.now()-start};
    })()`,true)));
    samples.push({cycle,results,processes:app.getAppMetrics().map(p=>({pid:p.pid,type:p.type,rssKiB:p.memory.workingSetSize}))});

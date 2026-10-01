@@ -2178,6 +2178,22 @@ export function chatGptPromptFilePayloads(
   return files;
 }
 
+/** Read the editor's plain text, including semantic hard breaks, without connector pills. */
+export function readPlainTextFromComposer(element: HTMLElement): string {
+  const clone = element.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll(
+    '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
+  ).forEach(part => part.remove());
+  const read = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+    if (node instanceof HTMLElement && node.tagName === "BR") {
+      return node.classList.contains("ProseMirror-trailingBreak") ? "" : "\n";
+    }
+    return [...node.childNodes].map(read).join("");
+  };
+  return [...clone.childNodes].map(read).join("\n").trimStart();
+}
+
 /**
  * Insert `value` at the caret of an already-resolved ChatGPT composer, returning whether the edit
  * was applied. Runs inside the page, so it may reference only globals and its two arguments.
@@ -2247,11 +2263,20 @@ export async function insertPlainTextIntoComposer(element: HTMLElement, value: s
       const insertion = document.createRange();
       insertion.setStart(anchor, caret.startOffset);
       insertion.collapse(true);
-      const textNode = document.createTextNode(value);
-      insertion.insertNode(textNode);
+      // The current ProseMirror DOMObserver normalizes newlines in text nodes
+      // to spaces, even inside a paragraph styled pre-wrap. Hard-break nodes
+      // preserve the original text through the editor's own reconciliation.
+      const fragment = document.createDocumentFragment();
+      const lines = value.split("\n");
+      for (let index = 0; index < lines.length; index++) {
+        if (index > 0) fragment.appendChild(document.createElement("br"));
+        fragment.appendChild(document.createTextNode(lines[index]!));
+      }
+      const lastNode = fragment.lastChild!;
+      insertion.insertNode(fragment);
       replacement.querySelectorAll("br.ProseMirror-trailingBreak").forEach(node => node.remove());
       block.replaceWith(replacement);
-      insertion.setStartAfter(textNode);
+      insertion.setStartAfter(lastNode);
       insertion.collapse(true);
       selection.removeAllRanges();
       selection.addRange(insertion);
@@ -3257,17 +3282,7 @@ export class ChatGptBrowserWorker {
 
   private async attachedPromptText(page: Page, abortSignal?: AbortSignal): Promise<string> {
     const composer = await this.activeComposer(page, 30_000, abortSignal);
-    return composer.evaluate(element => {
-      const clone = element.cloneNode(true) as HTMLElement;
-      clone.querySelectorAll(
-        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
-      )
-        .forEach(part => part.remove());
-      return [...clone.childNodes]
-        .map(child => child.textContent ?? "")
-        .join("\n")
-        .trimStart();
-    }, undefined, { timeout: 20_000, signal: abortSignal });
+    return composer.evaluate(readPlainTextFromComposer, undefined, { timeout: 20_000, signal: abortSignal });
   }
 
   private async assertPromptAttached(
