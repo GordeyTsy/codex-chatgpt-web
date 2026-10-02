@@ -146,6 +146,8 @@ interface ChatGptTurnRuntimeBase {
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
   usageInput?: CodexParsedRequest;
+  /** Latest native history, including returned tool results, used only for Web stall recovery. */
+  updateRecoveryInput?: (input: CodexParsedRequest) => void;
   conversationKey?: string;
   releaseRetainedConversation?: () => Promise<void>;
   /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */

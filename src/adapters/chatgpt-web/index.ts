@@ -21,12 +21,12 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
-import { ChatGptBrowserWorker } from "./browser-worker";
+import { ChatGptBrowserWorker, type BrowserTurn } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, type CompiledChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
-import { chatGptWebTurnRetryPolicy } from "./retry-policy";
+import { chatGptWebTurnRetryPolicy, MAX_CHATGPT_WEB_TURN_RETRIES } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
@@ -36,6 +36,7 @@ import {
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 import { ChatGptExternalTurnProgress } from "./turn-progress";
+import { ChatGptModelProgressWatchdog } from "./model-progress-watchdog";
 import {
   canonicalizeCompactionHandoff,
   existingStructuredCompactionRun,
@@ -351,6 +352,9 @@ export function createChatGptWebAdapter(
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
+  const progressTimeoutMs = provider.chatgptWeb?.modelProgressTimeoutMs;
+  // Validate before launching a browser or granting a tool capability.
+  new ChatGptModelProgressWatchdog(progressTimeoutMs);
   const experimentalSkillAttachments = provider.chatgptWeb?.experimentalSkillAttachments;
   if (experimentalSkillAttachments !== undefined && typeof experimentalSkillAttachments !== "boolean") {
     throw new Error("ChatGPT skill attachments preference must be a boolean");
@@ -481,6 +485,60 @@ export function createChatGptWebAdapter(
       return answer;
     });
     const browserAbort = new AbortController();
+    let modelProgress = new ChatGptModelProgressWatchdog(progressTimeoutMs);
+    let recoveryInput = checkpointInput.parsed;
+    let prepareRecovery: (() => Promise<CompiledChatGptWebPrompt & { release: () => void }>) | undefined;
+    const savedRecoveryInput = (): CodexParsedRequest => ({ ...recoveryInput,
+      context: { ...recoveryInput.context, messages: [ ...recoveryInput.context.messages,
+        ...(text.value() ? [{ role: "assistant" as const, content: [{ type: "text" as const, text: text.value() }], timestamp: Date.now() }] : []),
+        { role: "user" as const, timestamp: Date.now(), content:
+          "The previous Web conversation became inactive. Continue the same unfinished task from the recorded history and tool results. "
+          + "Do not repeat completed effects or retry rejected operations. Reconcile uncertain effects before retrying. "
+          + "Continue the visible answer from its last emitted character without repeating its prefix." },
+      ] },
+    });
+    const superviseBrowser = (template: BrowserTurn, progress?: ChatGptExternalTurnProgress) => {
+      const run = async (): Promise<string> => {
+        let emptyRecoveries = 0;
+        for (let attempt = 0; ; attempt++) {
+          if (browserAbort.signal.aborted) throw browserAbort.signal.reason;
+          modelProgress = new ChatGptModelProgressWatchdog(progressTimeoutMs);
+          const attemptAbort = new AbortController();
+          const prefix = text.value();
+          const previousToolProgress = progress?.snapshot().lastProgressAt;
+          const physical = worker.run({ ...template,
+            abortSignal: AbortSignal.any([browserAbort.signal, attemptAbort.signal]),
+            ...(attempt > 0 ? { requireRetainedConversation: false,
+              prepareResume: undefined, prepare: prepareRecovery! } : {}),
+          });
+          const turn = cancellableBrowserTurn(physical, attemptAbort);
+          const interval = setInterval(() => {
+            const failure = modelProgress.failure(progress?.snapshot());
+            if (!failure || attemptAbort.signal.aborted || browserAbort.signal.aborted) return;
+            clearInterval(interval);
+            console.warn(`[chatgpt-web] model_no_progress trace=${traceId} timeoutMs=${modelProgress.timeoutMs} pendingTools=0 attempt=${attempt}`);
+            turn.cancel(failure);
+          }, Math.min(1_000, modelProgress.timeoutMs));
+          try { return prefix + await turn.browser; }
+          catch (error) {
+            if (!(error instanceof ChatGptWebAdapterError && error.code === "chatgpt_model_no_progress")
+              || browserAbort.signal.aborted) throw error;
+            // Capture and release the old surface before taking a new lease. The MCP capability
+            // and native turn remain the same; completed results stay in the latest native input.
+            await turn.physicalSettlement;
+            await releaseRetainedConversation?.();
+            capturedCheckpoint = undefined;
+            checkpointCaptureError = undefined;
+            const productive = modelProgress.outputCount > 0 || progress?.snapshot().lastProgressAt !== previousToolProgress;
+            emptyRecoveries = productive ? 0 : emptyRecoveries + 1;
+            if (emptyRecoveries > MAX_CHATGPT_WEB_TURN_RETRIES) throw error;
+            console.info(`[chatgpt-web] model_progress_recovery trace=${traceId} nextAttempt=${attempt + 1} emptyRecoveries=${emptyRecoveries}`);
+            trace.push({ kind: "commentary", text: "Recovering an inactive ChatGPT conversation from saved progress." });
+          } finally { clearInterval(interval); }
+        }
+      };
+      return cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(Promise.resolve().then(run))), browserAbort);
+    };
     let browserOwnerSettled = false;
     const trackBrowserOwner = (browser: Promise<string>): Promise<string> => browser.finally(() => {
       browserOwnerSettled = true;
@@ -520,6 +578,7 @@ export function createChatGptWebAdapter(
       } : {}),
       onSubmitted: () => {
         if (!parsed._compactionRequest) submission.phase = "accepted";
+        modelProgress.start();
         hooks.onCompactionProgress?.();
       },
     };
@@ -692,7 +751,11 @@ export function createChatGptWebAdapter(
       };
     }
     if (!mode.localTools) {
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
+      prepareRecovery = async () => ({
+        ...compileChatGptWebPrompt(savedRecoveryInput(), turnCapabilities, undefined, compileOptionsFor(recoveryInput)),
+        release: () => {},
+      });
+      const browserTurn = superviseBrowser({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
@@ -711,14 +774,20 @@ export function createChatGptWebAdapter(
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
         ...multipartProgressLifecycle,
-        onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
-        onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
-        onTextDelta: delta => text.push(delta),
+        onReasoningSummary: (text, continuation) => {
+          modelProgress.recordOutput(text);
+          trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) });
+        },
+        onCommentary: (text, continuation) => {
+          modelProgress.recordOutput(text);
+          trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) });
+        },
+        onTextDelta: delta => { modelProgress.recordOutput(delta); text.push(delta); },
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
-      })), browserAbort);
+      });
       return {
         mode: "read-only",
         browser: browserTurn.browser,
@@ -726,6 +795,7 @@ export function createChatGptWebAdapter(
         trace,
         text,
         usageInput: checkpointInput.parsed,
+        updateRecoveryInput: input => { recoveryInput = input; },
         submission,
         cancel: browserTurn.cancel,
       };
@@ -763,7 +833,8 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
+    prepareRecovery = () => prepareWith(savedRecoveryInput());
+    const browserTurn = superviseBrowser({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
@@ -776,9 +847,15 @@ export function createChatGptWebAdapter(
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
-      onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
-      onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
-      onTextDelta: delta => text.push(delta),
+      onReasoningSummary: (text, continuation) => {
+        modelProgress.recordOutput(text);
+        trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) });
+      },
+      onCommentary: (text, continuation) => {
+        modelProgress.recordOutput(text);
+        trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) });
+      },
+      onTextDelta: delta => { modelProgress.recordOutput(delta); text.push(delta); },
       externalProgress,
       completionFence: {
         begin: async () => broker.beginCompletionFence(await token.promise),
@@ -788,7 +865,7 @@ export function createChatGptWebAdapter(
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
-    }))), browserAbort);
+    }, externalProgress);
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;
@@ -804,6 +881,7 @@ export function createChatGptWebAdapter(
       trace,
       text,
       usageInput: checkpointInput.parsed,
+      updateRecoveryInput: input => { recoveryInput = input; },
       ...(conversationKey ? { conversationKey } : {}),
       ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
       retireCapability: async () => {
@@ -1182,6 +1260,7 @@ export function createChatGptWebAdapter(
           nativeIdentity.threadId,
           chatGptInstructionLineage(parsed),
         );
+        session.runtime.updateRecoveryInput?.(parsed);
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
           // Journal the complete synchronous event batch before touching the HTTP observer. If the

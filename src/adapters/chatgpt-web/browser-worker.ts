@@ -1,5 +1,6 @@
 import { installAutolinkRenderCompatibility } from "./autolink-render-compat";
 import { ChatGptMessageDeliveryRecovery } from "./message-delivery-recovery";
+import { captureChatGptTimeoutPage } from "./timeout-page-snapshot";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -2103,6 +2104,17 @@ class ChatGptBrowserDiagnostics {
         + ` checkpoint=${browserDiagnosticCheckpoint(checkpoint)}:`
         + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
       );
+    }
+  }
+
+  async captureModelTimeout(page: Page): Promise<void> {
+    await this.capture(page, "model-progress-timeout");
+    try {
+      const stem = join(this.directory, `${String(++this.sequence).padStart(2, "0")}-model-progress-timeout-private`);
+      await captureChatGptTimeoutPage(page, stem);
+      console.info(`[chatgpt-web] private timeout page trace=${this.traceId} path=${stem}`);
+    } catch {
+      console.warn(`[chatgpt-web] private timeout page capture failed trace=${this.traceId}`);
     }
   }
 }
@@ -5745,7 +5757,12 @@ export class ChatGptBrowserWorker {
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
-        await diagnostics.capture(diagnosticPage, "turn-failed", error);
+        const reason = originalAbortSignal?.reason;
+        if (reason instanceof ChatGptWebAdapterError && reason.code === "chatgpt_model_no_progress") {
+          await diagnostics.captureModelTimeout(diagnosticPage);
+        } else {
+          await diagnostics.capture(diagnosticPage, "turn-failed", error);
+        }
       }
       throw error;
     } finally {

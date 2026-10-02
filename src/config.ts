@@ -125,6 +125,8 @@ export interface AppConfig {
   zeroRiskProEnabled: boolean;
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
+  /** Real model inactivity budget for automatic Web turns; defaults to five minutes. */
+  modelProgressTimeoutMs?: number;
   /** Optional private inventory of trusted loopback model routes. */
   externalRoutesPath?: string;
   autoApproveToolCalls: boolean;
@@ -543,6 +545,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
     throw new Error(`Invalid stallTimeoutSec in ${path}`);
   }
+  if (parsed.modelProgressTimeoutMs !== undefined
+    && (!Number.isFinite(parsed.modelProgressTimeoutMs) || parsed.modelProgressTimeoutMs <= 0)) {
+    throw new Error(`Invalid modelProgressTimeoutMs in ${path}`);
+  }
   if (parsed.externalRoutesPath !== undefined
     && (typeof parsed.externalRoutesPath !== "string" || !parsed.externalRoutesPath.trim()
       || !isAbsolute(expandUserPath(parsed.externalRoutesPath)))) {
@@ -649,6 +655,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
       useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
+      ...(config.modelProgressTimeoutMs !== undefined ? { modelProgressTimeoutMs: config.modelProgressTimeoutMs } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,
     },
   };

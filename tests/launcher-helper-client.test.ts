@@ -306,7 +306,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
   });
 });
 
-test("an abort dispatched during run submission cannot overtake the run frame", async () => {
+test.each([false, true])("an abort cannot overtake the run frame and carries watchdog evidence=%s", async watchdog => {
   const controller = new AbortController();
   const messages: string[] = [];
   let released = false;
@@ -323,14 +323,17 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
   });
   const internal = client as unknown as {
     ensureChild(): Promise<void>;
-    send(message: { type: string; id?: string }): Promise<void>;
+    send(message: { type: string; id?: string; reason?: string }): Promise<void>;
     finishWithError(id: string, error: Error): void;
   };
   internal.ensureChild = async () => {};
   internal.send = async message => {
     messages.push(message.type);
-    if (message.type === "run") controller.abort();
+    if (message.type === "run") controller.abort(watchdog
+      ? new ChatGptWebAdapterError("no progress", { status: 502, errorType: "server_error", code: "chatgpt_model_no_progress", retryable: true })
+      : undefined);
     if (message.type === "abort" && message.id) {
+      expect(message.reason).toBe(watchdog ? "model_no_progress" : undefined);
       queueMicrotask(() => internal.finishWithError(
         message.id!,
         new DOMException("ChatGPT web turn aborted", "AbortError"),

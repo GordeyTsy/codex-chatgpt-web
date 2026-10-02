@@ -75,7 +75,7 @@ type InputMessage = RunMessage
   | { type: "completion_fence_begin_ack"; id: string; requestId: number; revision: number | null }
   | { type: "completion_fence_commit_ack"; id: string; requestId: number; committed: boolean }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
-  | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" }
+  | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" | "model_no_progress" }
   | { type: "shutdown" };
 
 let outputFailure: Error | undefined;
@@ -483,6 +483,10 @@ input.on("line", line => {
   } else if (message.type === "abort") {
     abortControllers.get(message.id)?.abort(message.reason === "compaction_handoff_accepted"
       ? new ChatGptCompactionHandoffAccepted()
+      : message.reason === "model_no_progress"
+        ? new ChatGptWebAdapterError("ChatGPT model progress watchdog expired", {
+          status: 502, errorType: "server_error", code: "chatgpt_model_no_progress", retryable: true,
+        })
       : undefined);
     preparedSelections.get(message.id)?.cancel();
     const waiter = sendActivationWaiters.get(message.id);

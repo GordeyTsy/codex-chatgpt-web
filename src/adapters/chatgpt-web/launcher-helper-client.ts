@@ -248,6 +248,9 @@ export class LauncherBrowserHelperClient {
               id: turn.traceId,
               ...(turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted
                 ? { reason: "compaction_handoff_accepted" }
+                : turn.abortSignal?.reason instanceof ChatGptWebAdapterError
+                  && turn.abortSignal.reason.code === "chatgpt_model_no_progress"
+                  ? { reason: "model_no_progress" }
                 : {}),
             }).catch(error => {
               this.finishWithError(

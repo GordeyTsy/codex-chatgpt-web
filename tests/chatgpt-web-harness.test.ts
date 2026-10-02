@@ -284,6 +284,177 @@ function canonicalJson(value: unknown): string {
 }
 
 describe("ChatGPT outer-native harness v4", () => {
+  test("bridge recovers a heartbeat-only browser within the same native turn from preserved history", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-no-progress-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://no-progress-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true,
+        modelProgressTimeoutMs: 40, experimentalFreshConversationPerTurn: true,
+        solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const prompts: string[] = [];
+    let cleaned = false;
+    worker.run = async turn => {
+      const prepared = await turn.prepare(); prompts.push(prepared.text); prepared.release();
+      turn.onSubmitted?.();
+      if (prompts.length === 2) {
+        expect(cleaned).toBeTrue();
+        expect(turn.retainConversation).not.toBe(true);
+        turn.onTextDelta("Recovered answer"); return "Recovered answer";
+      }
+      const heartbeat = setInterval(() => turn.onHeartbeat?.(), 5);
+      try {
+        return await new Promise<string>((_, reject) => {
+          turn.abortSignal!.addEventListener("abort", () => reject(turn.abortSignal!.reason), { once: true });
+        });
+      } finally { clearInterval(heartbeat); cleaned = true; }
+    };
+    try {
+      const adapter = createChatGptWebAdapter(provider);
+      const request = rawWireRequest(environmentXml);
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(events.some(event => event.type === "error")).toBeFalse();
+      expect(events.at(-1)?.type).toBe("done");
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain("Inspect the project");
+      expect(prompts[1]).toContain("The previous Web conversation became inactive");
+      expect(cleaned).toBeTrue();
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
+  test("a running tool protects the browser beyond the timeout until its result returns", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-long-progress-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://long-progress-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true,
+        modelProgressTimeoutMs: 40, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    worker.run = async turn => {
+      const prepared = await turn.prepare(); prepared.release();
+      turn.onSubmitted?.();
+      const progress = turn.externalProgress as ChatGptExternalTurnProgress;
+      progress.recordToolBatch(1);
+      await Bun.sleep(140);
+      expect(turn.abortSignal!.aborted).toBeFalse();
+      progress.recordToolResult();
+      await Bun.sleep(15);
+      expect(turn.abortSignal!.aborted).toBeFalse();
+      turn.onTextDelta("Long tool completed"); return "Long tool completed";
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml),
+        { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)?.type).toBe("done");
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
+  test("same-turn recovery preserves a completed broker call and latest native result without reinvocation", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-result-recovery-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://result-recovery-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, modelProgressTimeoutMs: 60,
+        solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const tokens: string[] = [];
+    let invocations = 0;
+    worker.run = async turn => {
+      const prepared = await turn.prepare(); prepared.release(); turn.onSubmitted?.();
+      const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)![1]!;
+      tokens.push(token);
+      if (tokens.length === 2) {
+        expect(prepared.text).toContain("CONFIRMED_EFFECT_RECEIPT");
+        expect(prepared.text).toContain("Do not repeat completed effects");
+        expect(token).toBe(tokens[0]);
+        turn.onTextDelta("Continued after confirmed effect"); return "Continued after confirmed effect";
+      }
+      const claim = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+      invocations++;
+      await invokeAfterBrowserBoundary(turn, () => callTurnBroker(socketPath, {
+        method: "invoke", bindingId: claim.bindingId, wireName: "exec_command", freeform: false,
+        arguments: { cmd: "confirmed-effect", workdir: tempRoot },
+      }));
+      return new Promise<string>((_, reject) => {
+        turn.abortSignal!.addEventListener("abort", () => reject(turn.abortSignal!.reason), { once: true });
+      });
+    };
+    try {
+      const adapter = createChatGptWebAdapter(provider);
+      const first = rawWireRequest(environmentXml);
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(first, { headers: new Headers() }, event => events.push(event));
+      const call = events.find(event => event.type === "tool_call_start") as Extract<AdapterEvent, { type: "tool_call_start" }>;
+      expect(call).toBeDefined();
+      await Bun.sleep(150); // a real outstanding broker call must suspend the watchdog
+      expect(tokens).toHaveLength(1);
+      const next = structuredClone(first);
+      next.context.messages.push({ role: "assistant", timestamp: 3,
+        content: [{ type: "toolCall", id: call.id, name: "exec_command", arguments: { cmd: "confirmed-effect", workdir: tempRoot } }] },
+      { role: "toolResult", timestamp: 4, toolCallId: call.id, toolName: "exec_command",
+        content: "CONFIRMED_EFFECT_RECEIPT", isError: false });
+      (next._rawBody as { input: unknown[] }).input.push(
+        { type: "function_call", call_id: call.id, name: "exec_command", arguments: JSON.stringify({ cmd: "confirmed-effect", workdir: tempRoot }) },
+        { type: "function_call_output", call_id: call.id, output: "CONFIRMED_EFFECT_RECEIPT" });
+      const final: AdapterEvent[] = [];
+      await adapter.runTurn!(next, { headers: new Headers() }, event => final.push(event));
+      expect(final.at(-1)?.type).toBe("done");
+      expect(final.some(event => event.type === "error" || event.type === "tool_call_start")).toBeFalse();
+      expect(invocations).toBe(1); expect(tokens).toHaveLength(2);
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
+  test("consecutive empty Web recoveries remain bounded", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-empty-recovery-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://empty-recovery-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: false, modelProgressTimeoutMs: 20,
+        solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider); const originalRun = worker.run.bind(worker);
+    let starts = 0;
+    worker.run = async turn => {
+      starts++; turn.onSubmitted?.();
+      return new Promise<string>((_, reject) => turn.abortSignal!.addEventListener("abort",
+        () => reject(turn.abortSignal!.reason), { once: true }));
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml),
+        { headers: new Headers() }, event => events.push(event));
+      expect(starts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 1);
+      expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_model_no_progress" });
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
+  test("productive Web recoveries reset the empty budget and preserve an emitted text prefix", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-productive-recovery-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://productive-recovery-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: false, modelProgressTimeoutMs: 20,
+        solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider); const originalRun = worker.run.bind(worker);
+    let starts = 0;
+    worker.run = async turn => {
+      starts++; const prepared = await turn.prepare(); prepared.release(); turn.onSubmitted?.();
+      if (starts > 1) expect(prepared.text).toContain("Continue the visible answer");
+      if (starts === 5) { turn.onTextDelta("end"); return "end"; }
+      turn.onTextDelta(`${starts} `);
+      return new Promise<string>((_, reject) => turn.abortSignal!.addEventListener("abort",
+        () => reject(turn.abortSignal!.reason), { once: true }));
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml),
+        { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)?.type).toBe("done"); expect(starts).toBe(5);
+      expect(events.filter(event => event.type === "text_delta" && event.phase === "final_answer")
+        .map(event => (event as { text: string }).text).join(""))
+        .toBe("1 2 3 4 end");
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
   test("extracts authoritative environment, tool registry, and turn identity from the Codex wire envelope", () => {
     const request = rawWireRequest(environmentXml);
     expect(extractChatGptTurnEnvironment(request)).toEqual({
