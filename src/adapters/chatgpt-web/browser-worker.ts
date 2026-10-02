@@ -1,4 +1,5 @@
 import { installAutolinkRenderCompatibility } from "./autolink-render-compat";
+import { ChatGptMessageDeliveryRecovery } from "./message-delivery-recovery";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -5372,7 +5373,8 @@ export class ChatGptBrowserWorker {
           retryable: false,
         });
       };
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const messageDeliveryRecovery = new ChatGptMessageDeliveryRecovery();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
@@ -5399,6 +5401,22 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
+        await throwIfChatGptRateLimitDialog(page);
+        const deliveryRecovery = await messageDeliveryRecovery.recover(responseTurn.locator, {
+          signal: turn.abortSignal,
+          toolCallsInFlight: chatGptExternalToolCallsAreInFlight(turn.externalProgress?.snapshot()),
+        });
+        if (deliveryRecovery !== "none") {
+          if (deliveryRecovery === "recovered") {
+            responseDomCache.key = undefined;
+            responseDomCache.snapshot = undefined;
+            completionFenceRevision = undefined;
+            domHealthTracker = new ChatGptTurnDomHealthTracker();
+            internalObservationFaults = 0;
+          }
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          continue;
+        }
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
