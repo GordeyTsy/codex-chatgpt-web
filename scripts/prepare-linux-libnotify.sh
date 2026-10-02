@@ -33,8 +33,14 @@ meson setup "$TEMP_DIR/build" "$TEMP_DIR/libnotify-$VERSION" \
   -Dintrospection=disabled \
   -Dman=false \
   -Dgtk_doc=false \
-  -Ddocbook_docs=disabled >/dev/null
-meson compile -C "$TEMP_DIR/build" >/dev/null
+  -Ddocbook_docs=disabled >"$TEMP_DIR/meson-setup.log" 2>&1 || {
+    cat "$TEMP_DIR/meson-setup.log" >&2
+    exit 1
+  }
+meson compile -C "$TEMP_DIR/build" >"$TEMP_DIR/meson-compile.log" 2>&1 || {
+  cat "$TEMP_DIR/meson-compile.log" >&2
+  exit 1
+}
 
 # Use Meson's SONAME link; recursive matching can select its .symbols metadata.
 LIBRARY="$TEMP_DIR/build/libnotify/libnotify.so.4"
