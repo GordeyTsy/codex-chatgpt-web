@@ -401,7 +401,10 @@ describe("ChatGPT outer-native harness v4", () => {
         { type: "function_call", call_id: call.id, name: "exec_command", arguments: JSON.stringify({ cmd: "confirmed-effect", workdir: tempRoot }) },
         { type: "function_call_output", call_id: call.id, output: "CONFIRMED_EFFECT_RECEIPT" });
       const final: AdapterEvent[] = [];
-      await adapter.runTurn!(next, { headers: new Headers() }, event => final.push(event));
+      const completion = adapter.runTurn!(next, { headers: new Headers() }, event => final.push(event));
+      await Bun.sleep(5);
+      const staleReplay = adapter.runTurn!(first, { headers: new Headers() }, () => {});
+      await Promise.all([completion, staleReplay]);
       expect(final.at(-1)?.type).toBe("done");
       expect(final.some(event => event.type === "error" || event.type === "tool_call_start")).toBeFalse();
       expect(invocations).toBe(1); expect(tokens).toHaveLength(2);

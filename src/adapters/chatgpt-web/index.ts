@@ -1260,7 +1260,6 @@ export function createChatGptWebAdapter(
           nativeIdentity.threadId,
           chatGptInstructionLineage(parsed),
         );
-        session.runtime.updateRecoveryInput?.(parsed);
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
           // Journal the complete synchronous event batch before touching the HTTP observer. If the
@@ -1290,6 +1289,9 @@ export function createChatGptWebAdapter(
               session.completeRound(roundKey);
               return;
             }
+            // Replays of earlier completed rounds must not rewind saved tool results while
+            // another observer owns the current round. Update only under the session lock.
+            session.runtime.updateRecoveryInput?.(parsed);
             const settled = session.settledOutcome();
             if (settled) {
               if (settled.type === "error") throw settled.error;
