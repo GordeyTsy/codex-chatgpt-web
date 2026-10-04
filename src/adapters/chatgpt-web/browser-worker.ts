@@ -80,6 +80,7 @@ import {
 import {
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
   resolveChatGptWebContextLimits,
+  resolveChatGptWebAccountContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
@@ -992,6 +993,15 @@ export function assertChatGptWebInputWithinLimits(
     );
   }
   const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
+  if (capabilities.fixedWebContextWindow !== undefined && modelId === CHATGPT_WEB_MODEL_ID) {
+    const messageBudget = resolveChatGptWebMessageTokenBudget(modelId, effort, capabilities);
+    if (estimatedMessageTokens > messageBudget) {
+      throw new ChatGptWebAdapterError(
+        `This browser message exceeds its ${messageBudget.toLocaleString("en-US")}-token transport budget. Use Bigger Context multipart delivery or compact the task.`,
+        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      );
+    }
+  }
   const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
     modelId,
     effort,
@@ -1049,7 +1059,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
   }
-  const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
+  const { contextWindow: baseContextWindow } = resolveChatGptWebAccountContextLimits(
     modelId,
     effort,
     { ...capabilities, experimentalBiggerContext: false },
@@ -1104,7 +1114,9 @@ export function assertChatGptWebMultipartInputWithinLimits(
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
   // More transport messages do not enlarge the model's advertised context window.
-  const experimentalContextWindow = baseContextWindow * Math.min(partCount, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
+  const experimentalContextWindow = capabilities.fixedWebContextWindow === undefined
+    ? baseContextWindow * Math.min(partCount, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER)
+    : resolveChatGptWebContextLimits(modelId, effort, capabilities).contextWindow;
   if (estimatedInputTokens < experimentalContextWindow) return;
   const partLabel = partCount === 2 ? "two-part" : "six-part";
   throw new ChatGptWebAdapterError(

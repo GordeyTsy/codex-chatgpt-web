@@ -104,6 +104,8 @@ export interface AppConfig {
   host: "127.0.0.1";
   port: number;
   contextWindow: number;
+  /** Optional fixed window for every Web route, leaving native and external models unchanged. */
+  fixedWebContextWindow?: number;
   appName: string;
   automaticAppName: string;
   manualAppName: string;
@@ -440,6 +442,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow! <= 0) {
     throw new Error(`Invalid contextWindow in ${path}`);
   }
+  if (parsed.fixedWebContextWindow !== undefined
+    && (!Number.isSafeInteger(parsed.fixedWebContextWindow) || parsed.fixedWebContextWindow <= 0)) {
+    throw new Error(`Invalid fixedWebContextWindow in ${path}`);
+  }
   if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
     throw new Error(`Invalid autoApproveToolCalls in ${path}`);
@@ -650,6 +656,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       solAvailable: manual ? false : config.solAvailable,
       extraHighAvailable: !manual && config.extraHighAvailable === true,
       proAvailable: manual ? false : config.proAvailable,
+      fixedWebContextWindow: config.fixedWebContextWindow,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,

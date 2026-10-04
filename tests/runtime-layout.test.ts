@@ -33,6 +33,24 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+test("fixed Web context persists separately from provider defaults and rejects malformed settings", () => {
+  const root = join(tmpdir(), `codex-web-fixed-context-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const config: Record<string, unknown> = { ...defaultConfig("browser-only"), fixedWebContextWindow: 500_000 };
+  const persist = () => writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  persist();
+  expect(loadConfig()!.fixedWebContextWindow).toBe(500_000);
+  expect(providerConfig(loadConfig()!).chatgptWeb!.fixedWebContextWindow).toBe(500_000);
+  expect(providerConfig(loadConfig()!).contextWindow).toBe(256_000);
+  for (const invalid of [0, -1, 500_000.5, "500000", Number.MAX_SAFE_INTEGER + 1]) {
+    config.fixedWebContextWindow = invalid;
+    persist();
+    expect(() => loadConfig()).toThrow("fixedWebContextWindow");
+  }
+});
+
 test("managed runtime commands reject every ephemeral path component", () => {
   expect(() => assertDurableRuntimeCommand(["/private/tmp/codex-chatgpt-web"])).toThrow("ephemeral path");
   expect(() => assertDurableRuntimeCommand([process.execPath, "/tmp/build/app/cli.js"])).toThrow("ephemeral path");

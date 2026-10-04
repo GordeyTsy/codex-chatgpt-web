@@ -11,6 +11,7 @@ export interface ChatGptWebCapabilities {
   solAvailable: boolean;
   extraHighAvailable: boolean;
   proAvailable: boolean;
+  fixedWebContextWindow?: number;
 }
 
 export interface ChatGptWebModelMode {

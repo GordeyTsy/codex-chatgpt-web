@@ -109,8 +109,27 @@ function contextLimits(
   };
 }
 
-/** Resolve the product limit for the selected visible ChatGPT mode. */
+/** Resolve the configured Web window without changing measured browser message boundaries. */
 export function resolveChatGptWebContextLimits(
+  backendModel: ChatGptWebBackendModel,
+  effort: ChatGptWebAdapterEffort,
+  capabilities: ChatGptWebAccountCapabilities,
+): ChatGptWebContextLimits {
+  const defaults = resolveChatGptWebAccountContextLimits(backendModel, effort, capabilities);
+  const fixed = capabilities.fixedWebContextWindow;
+  if (fixed === undefined) return defaults;
+  if (!Number.isSafeInteger(fixed) || fixed <= 0) {
+    throw new Error("fixedWebContextWindow must be a positive safe integer");
+  }
+  return {
+    contextWindow: fixed,
+    effectiveContextWindowPercent: 100,
+    autoCompactTokenLimit: Math.floor(fixed * 0.9),
+  };
+}
+
+/** Account-derived defaults also size individual browser messages and multipart stages. */
+export function resolveChatGptWebAccountContextLimits(
   backendModel: ChatGptWebBackendModel,
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
@@ -211,7 +230,7 @@ export function resolveChatGptWebMessageTokenBudget(
   capabilities: ChatGptWebAccountCapabilities,
   imageTokens = 0,
 ): number {
-  const { contextWindow } = resolveChatGptWebContextLimits(
+  const { contextWindow } = resolveChatGptWebAccountContextLimits(
     backendModel, effort, { ...capabilities, experimentalBiggerContext: false },
   );
   const { browserMessageTokenLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
@@ -252,6 +271,8 @@ export interface ChatGptWebZeroRiskModelRoute extends ChatGptWebModelRouteBase {
 export type ChatGptWebModelRoute = ChatGptWebAutomaticModelRoute | ChatGptWebZeroRiskModelRoute;
 
 export interface ChatGptWebAccountCapabilities {
+  /** Explicit Web-only window; independent of account tier, effort and multipart mode. */
+  fixedWebContextWindow?: number;
   solAvailable: boolean;
   /** Missing in older saved observations; setup must probe before exposing Extra High. */
   extraHighAvailable?: boolean;
