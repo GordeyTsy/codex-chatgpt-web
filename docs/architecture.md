@@ -50,6 +50,12 @@ launcher-owned codex-chatgpt-web daemon
   preserves Codex's native freeform `exec`; its tool registry enforces the same bounded
   `wait_agent` contract as direct and structured calls.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
+- On Unix, the broker binds a private socket name and publishes the configured endpoint as a
+  hard link. Closing a retired listener cannot unlink a replacement at that public endpoint.
+  Turn registration and `/healthz` restore a missing public name only from the same verified
+  listener inode, preserving active capabilities and calls. A foreign replacement is retained
+  and makes health return HTTP 503 with `broker_ready: false`; health never grants access or
+  retries a tool call. Windows retains its named-pipe transport.
 
 ### Repository DEV driver
 

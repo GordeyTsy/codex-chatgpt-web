@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,33 @@ import { compactRequest, HttpTurnCounter, responseRequest, routeChatGptWebReques
 test("DEV harness configuration cannot bind a Responses listener", () => {
   const config = { ...defaultConfig("browser-only"), purpose: "dev-harness" as const, port: 0 };
   expect(() => startServer(config)).toThrow("cannot start a Responses listener");
+});
+
+test.skipIf(process.platform === "win32")("health repairs only its missing broker name and reports foreign replacements", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-health-broker-"));
+  const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
+  const server = startServer(config);
+  try {
+    const health = () => fetch(`http://127.0.0.1:${server.port}/healthz`);
+    expect(await (await health()).json()).toMatchObject({ status: "ok", broker_ready: true });
+    const identity = statSync(config.brokerSocketPath);
+    unlinkSync(config.brokerSocketPath);
+    const repaired = await health();
+    expect(repaired.status).toBe(200);
+    expect(statSync(config.brokerSocketPath).ino).toBe(identity.ino);
+    await expect(callTurnBroker(config.brokerSocketPath, { method: "claim", token: "not-registered" }))
+      .rejects.toThrow("turn token is invalid");
+    unlinkSync(config.brokerSocketPath);
+    writeFileSync(config.brokerSocketPath, "foreign owner", { mode: 0o600 });
+    const broken = await health();
+    expect(broken.status).toBe(503);
+    expect(await broken.json()).toMatchObject({ status: "degraded", broker_ready: false });
+    expect(await Bun.file(config.brokerSocketPath).text()).toBe("foreign owner");
+  } finally {
+    await server.stop(true);
+    await closeTurnBrokers();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 async function waitForTurnCount(turns: HttpTurnCounter, expected: number): Promise<void> {

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
 import {
   CompactionTransactionStore,
@@ -278,6 +278,7 @@ export class TurnBroker implements TurnBrokerOwner {
   private server?: Server;
   private startPromise?: Promise<void>;
   private socketIdentity?: { dev: number; ino: number };
+  private boundSocketPath?: string;
 
   private constructor(readonly socketPath: string) {}
 
@@ -289,6 +290,7 @@ export class TurnBroker implements TurnBrokerOwner {
    */
   async listen(): Promise<void> {
     await this.start();
+    this.restoreEndpoint();
   }
 
   async register(
@@ -298,7 +300,7 @@ export class TurnBroker implements TurnBrokerOwner {
     externalOwner = false,
     handlePrefix = "turn",
   ): Promise<string> {
-    await this.start();
+    await this.listen();
     this.prune();
     if (externalOwner && !this.acceptingExternalOwners) {
       throw new Error("turn broker is draining and does not accept new external owners");
@@ -767,12 +769,43 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     const identity = this.socketIdentity;
     this.socketIdentity = undefined;
-    if (identity && existsSync(this.socketPath)) {
-      const current = lstatSync(this.socketPath);
-      if (current.isSocket() && current.dev === identity.dev && current.ino === identity.ino) {
-        unlinkSync(this.socketPath);
+    const bound = this.boundSocketPath;
+    this.boundSocketPath = undefined;
+    for (const path of new Set([this.socketPath, ...(bound ? [bound] : [])])) {
+      if (identity && existsSync(path)) {
+        const current = lstatSync(path);
+        if (current.isSocket() && current.dev === identity.dev && current.ino === identity.ino) {
+          unlinkSync(path);
+        }
       }
     }
+  }
+
+  /** Repair only this listener's missing name, preserving channels and pending calls. */
+  private restoreEndpoint(): void {
+    if (isWindowsPipeEndpoint(this.socketPath)) return;
+    const identity = this.socketIdentity;
+    const bound = this.boundSocketPath;
+    if (!identity || !bound || !this.server?.listening) throw new Error("ChatGPT web broker listener is unavailable");
+    const verify = (path: string): void => {
+      const current = lstatSync(path);
+      if (!current.isSocket() || current.dev !== identity.dev || current.ino !== identity.ino
+        || (current.mode & 0o077) !== 0
+        || (typeof process.getuid === "function" && current.uid !== process.getuid())) {
+        throw new Error("ChatGPT web broker endpoint no longer belongs to this listener");
+      }
+    };
+    if (!existsSync(bound)) {
+      // The published name can prove ownership if only the private name was removed.
+      verify(this.socketPath);
+      linkSync(this.socketPath, bound);
+    }
+    verify(bound);
+    if (!existsSync(this.socketPath)) {
+      try { linkSync(bound, this.socketPath); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    }
+    verify(this.socketPath);
   }
 
   private start(): Promise<void> {
@@ -794,6 +827,14 @@ export class TurnBroker implements TurnBrokerOwner {
         mkdirSync(dirname(this.socketPath), { recursive: true, mode: 0o700 });
       }
       const listen = () => {
+        // net.Server may unlink its listen address on close. Bind a unique private
+        // name and publish a hard link so an old server cannot unlink a successor.
+        const bound = windowsPipe ? this.socketPath : join(dirname(this.socketPath), `.b-${randomBytes(6).toString("hex")}`);
+        if (!windowsPipe && Buffer.byteLength(bound) > MAX_UNIX_SOCKET_PATH_BYTES) {
+          rejectStart(new Error("ChatGPT web broker runtime directory leaves no room for a private Unix socket name"));
+          return;
+        }
+        this.boundSocketPath = windowsPipe ? undefined : bound;
         const server = createServer(socket => this.handleSocket(socket));
         this.server = server;
         server.once("error", rejectStart);
@@ -802,14 +843,20 @@ export class TurnBroker implements TurnBrokerOwner {
             `[chatgpt-web] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
           );
         });
-        server.listen(this.socketPath, () => {
+        server.listen(bound, () => {
           server.off("error", rejectStart);
-          if (!windowsPipe) {
-            const { dev, ino } = lstatSync(this.socketPath);
-            this.socketIdentity = { dev, ino };
-            chmodSync(this.socketPath, 0o600);
+          try {
+            if (!windowsPipe) {
+              const { dev, ino } = lstatSync(bound);
+              this.socketIdentity = { dev, ino };
+              chmodSync(bound, 0o600);
+              this.restoreEndpoint();
+            }
+            resolveStart();
+          } catch (error) {
+            rejectStart(errorOf(error));
+            server.close();
           }
-          resolveStart();
         });
       };
 
@@ -861,7 +908,13 @@ export class TurnBroker implements TurnBrokerOwner {
             return;
           }
           try {
-            if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
+            if (existsSync(this.socketPath)) {
+              const current = lstatSync(this.socketPath);
+              if (!current.isSocket() || current.dev !== socketStat.dev || current.ino !== socketStat.ino) {
+                throw new Error("ChatGPT web broker socket changed while checking its owner");
+              }
+              unlinkSync(this.socketPath);
+            }
             listen();
           } catch (cleanupError) {
             rejectStart(errorOf(cleanupError));

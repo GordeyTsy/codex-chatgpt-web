@@ -1,11 +1,72 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
+
+test.skipIf(process.platform === "win32")("a removed broker name is restored without revoking its active token", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-relink-"));
+  const endpoint = join(root, "broker.sock");
+  const broker = TurnBroker.forSocket(endpoint);
+  try {
+    const token = await broker.register({ cwd: root, roots: [root], writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" }, tools: [] }, 10_000);
+    const identity = statSync(endpoint);
+    unlinkSync(endpoint);
+    await expect(callTurnBroker(endpoint, { method: "claim", token })).rejects.toThrow("ENOENT");
+    await broker.listen();
+    expect(statSync(endpoint).ino).toBe(identity.ino);
+    expect(statSync(endpoint).mode & 0o777).toBe(0o600);
+    const claimed = await callTurnBroker<{ bindingId: string }>(endpoint, { method: "claim", token });
+    expect(claimed.bindingId).toBeString();
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("closing an unlinked broker cannot remove a replacement listener", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-replaced-"));
+  const endpoint = join(root, "broker.sock");
+  const broker = TurnBroker.forSocket(endpoint);
+  const replacement = createServer(socket => socket.once("data", bytes => {
+    const request = JSON.parse(bytes.toString().trim());
+    socket.end(JSON.stringify({ id: request.id, result: { ready: true } }) + "\n");
+  }));
+  try {
+    await broker.listen();
+    unlinkSync(endpoint);
+    await new Promise<void>(resolve => replacement.listen(endpoint, resolve));
+    chmodSync(endpoint, 0o600);
+    await expect(broker.listen()).rejects.toThrow("no longer belongs");
+    await broker.close();
+    expect(await callTurnBroker<{ ready: boolean }>(endpoint, { method: "owner_status" })).toEqual({ ready: true });
+  } finally {
+    await broker.close();
+    await new Promise<void>(resolve => replacement.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("broker repair never overwrites a foreign file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-file-"));
+  const endpoint = join(root, "broker.sock");
+  const broker = TurnBroker.forSocket(endpoint);
+  try {
+    await broker.listen();
+    unlinkSync(endpoint);
+    writeFileSync(endpoint, "foreign owner", { mode: 0o600 });
+    await expect(broker.listen()).rejects.toThrow("no longer belongs");
+    await broker.close();
+    expect(await Bun.file(endpoint).text()).toBe("foreign owner");
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test.skipIf(process.platform === "win32")("closing a rejected broker leaves the live socket reachable", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-owner-"));

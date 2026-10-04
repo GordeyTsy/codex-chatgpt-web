@@ -855,6 +855,14 @@ export function startServer(
     async fetch(req) {
       const url = new URL(req.url);
       if (req.method === "GET" && url.pathname === "/healthz") {
+        if (shutdownPromise) return Response.json({ status: "stopping", pid: process.pid,
+          accepting_turns: false, ...activity() }, { status: 503 });
+        try {
+          await turnBroker?.listen();
+        } catch {
+          return Response.json({ status: "degraded", service: "codex-chatgpt-web", version: VERSION,
+            pid: process.pid, port: config.port, broker_ready: false, ...activity() }, { status: 503 });
+        }
         return Response.json({
           status: "ok",
           service: "codex-chatgpt-web",
@@ -864,6 +872,7 @@ export function startServer(
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
           accepting_turns: !draining,
+          ...(turnBroker ? { broker_ready: true } : {}),
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           model_catalog_requests: modelCatalogRequests,
