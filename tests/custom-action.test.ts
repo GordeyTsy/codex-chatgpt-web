@@ -113,3 +113,78 @@ test("custom action codes cannot be guessed or used in another turn", async () =
     await f.close();
   }
 });
+
+test("codex_report_failure issues cca code for codex_apply_patch and executes it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "custom-action-patch-"));
+  const socket = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socket);
+  const token = await broker.register({
+    cwd: root,
+    roots: [root],
+    writableRoots: [root],
+    sandboxPolicy: { type: "dangerFullAccess" },
+    tools: [
+      { name: "exec_command", description: "Fixture command", parameters: { type: "object" } },
+      { name: "apply_patch", description: "Fixture patch", parameters: { type: "string" } },
+    ],
+  }, 60_000, "custom-action-patch-fixture");
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  const client = new Client({ name: "custom-action-test", version: "1" });
+  await client.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: ["src/cli.ts", "mcp", "--broker-socket", socket],
+    cwd: process.cwd(),
+    env,
+    stderr: "pipe",
+  }));
+  const f = {
+    root,
+    broker,
+    token,
+    client,
+    close: async () => {
+      await client.close();
+      await broker.close();
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+
+  try {
+    const turnToken = f.token;
+    const patch = "*** Begin Patch\n*** Add File: /tmp/test_cca_patch.txt\n+hello\n*** End Patch";
+    const report = await f.client.callTool({
+      name: "codex_report_failure",
+      arguments: {
+        turn_token: turnToken,
+        failed_tool: "codex_apply_patch",
+        argument_summary: patch,
+        visible_error: "Blocked by safety checks",
+        category: "safety_rejection",
+      },
+    });
+    const expectedCode = `cca ${createHash("sha256").update(patch).digest("hex")}`;
+    expect(report.structuredContent).toMatchObject({
+      marker: "EXEC_FAIL",
+      recorded: true,
+      executed: false,
+      cca: expectedCode,
+    });
+
+    const pending = f.client.callTool({
+      name: "codex_custom_action",
+      arguments: {
+        turn_token: turnToken,
+        code: expectedCode,
+      },
+    });
+    const [request] = await f.broker.nextToolBatch(f.token);
+    expect(request?.wireName).toBe("apply_patch");
+    f.broker.completeTool(f.token, request!.callId, {
+      content: [{ type: "text", text: "Patch applied successfully" }],
+    });
+    const reply = await pending;
+    expect(JSON.stringify(reply)).toContain("Patch applied successfully");
+  } finally {
+    await f.close();
+  }
+});
