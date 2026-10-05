@@ -526,7 +526,7 @@ export function createChatGptWebAdapter(
             const authentication = error instanceof ChatGptWebAdapterError
               && ["chatgpt_session_expired", "chatgpt_sign_in_required"].includes(error.code);
             const recoverable = error instanceof ChatGptWebAdapterError
-              && ["chatgpt_model_no_progress", "chatgpt_message_delivery_timeout"].includes(error.code);
+              && ["chatgpt_model_no_progress", "chatgpt_message_delivery_timeout", "chatgpt_turn_token_mismatch"].includes(error.code);
             if ((!authentication && !recoverable) || browserAbort.signal.aborted) throw error;
             // Capture and release the old surface before taking a new lease. The MCP capability
             // and native turn remain the same; completed results stay in the latest native input.
@@ -545,7 +545,9 @@ export function createChatGptWebAdapter(
               finally { hooks.onAuthenticationWait?.(false); }
               console.info(`[chatgpt-web] authentication_restored trace=${traceId}`);
             } else {
-              const productive = modelProgress.outputCount > 0 || progress?.snapshot().lastProgressAt !== previousToolProgress;
+              // An inability report does not reset an empty capability-recovery budget.
+              const productive = (error.code !== "chatgpt_turn_token_mismatch" && modelProgress.outputCount > 0)
+                || progress?.snapshot().lastProgressAt !== previousToolProgress;
               emptyRecoveries = productive ? 0 : emptyRecoveries + 1;
               if (emptyRecoveries > MAX_CHATGPT_WEB_TURN_RETRIES) throw error;
             }

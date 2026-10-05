@@ -22,6 +22,7 @@ import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, RemoteTurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
+import { assertChatGptBindingCompletion } from "../src/adapters/chatgpt-web/binding-failure";
 import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
@@ -284,6 +285,57 @@ function canonicalJson(value: unknown): string {
 }
 
 describe("ChatGPT outer-native harness v4", () => {
+  test("an unusable model-supplied token cannot execute and recovers with the exact live owner token", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-token-mismatch-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://binding-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true,
+        solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider), originalRun = worker.run.bind(worker);
+    let starts = 0, ownerToken = "";
+    worker.run = async turn => {
+      const prepared = await turn.prepare(); prepared.release(); turn.onSubmitted?.();
+      const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)![1]!;
+      if (++starts === 1) {
+        ownerToken = token;
+        await expect(callTurnBroker(socketPath, { method: "claim", token: token.slice(0,-1) }))
+          .rejects.toThrow("invalid, expired, or revoked");
+        assertChatGptBindingCompletion("I could not continue: turn token is invalid, expired, or revoked.");
+      }
+      expect(token).toBe(ownerToken); expect(prepared.text).toContain("Copy that exact transport token character for character");
+      const claim = await callTurnBroker(socketPath, { method: "claim", token });
+      expect(claim).toBeDefined(); turn.onTextDelta("Recovered valid binding"); return "Recovered valid binding";
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml),
+        { headers: new Headers() }, event => events.push(event));
+      expect(starts).toBe(2); expect(events.some(e => e.type === "tool_call_start" || e.type === "error")).toBeFalse();
+      expect(events.at(-1)?.type).toBe("done");
+      expect(events.filter(e => e.type === "text_delta" && e.phase === "final_answer")
+        .map(e => (e as { text: string }).text).join("")).toBe("Recovered valid binding");
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
+  test("repeated binding inability reports cannot reset the empty recovery budget", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-empty-binding-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://empty-binding-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true,
+        solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider), originalRun = worker.run.bind(worker); let starts = 0;
+    worker.run = async turn => {
+      const prepared = await turn.prepare(); prepared.release(); turn.onSubmitted?.(); starts++;
+      turn.onCommentary?.("An inability report is not completed command work.");
+      assertChatGptBindingCompletion("Unable to continue: turn token is invalid, expired, or revoked.");
+      return "unreachable";
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml),
+        { headers: new Headers() }, event => events.push(event));
+      expect(starts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 1); expect(events.some(e => e.type === "error")).toBeTrue();
+      expect(events.some(e => e.type === "done")).toBeFalse();
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
   test("bridge recovers a heartbeat-only browser within the same native turn from preserved history", async () => {
     const socketPath = brokerTestEndpoint(`cgw-no-progress-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
@@ -423,7 +475,7 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
-  test.each(["inactivity", "logout", "delivery"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
+  test.each(["inactivity", "logout", "delivery", "binding"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
     const socketPath = brokerTestEndpoint(`cgw-result-recovery-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://result-recovery-${Date.now()}`,
       chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, modelProgressTimeoutMs: 60,
@@ -449,6 +501,7 @@ describe("ChatGPT outer-native harness v4", () => {
         method: "invoke", bindingId: claim.bindingId, wireName: "exec_command", freeform: false,
         arguments: { cmd: "confirmed-effect", workdir: tempRoot },
       }));
+      if (scenario === "binding") assertChatGptBindingCompletion("I could not continue: turn token is invalid, expired, or revoked.");
       if (scenario !== "inactivity") throw new ChatGptWebAdapterError("isolated browser failure", {
         status: scenario === "logout" ? 401 : 502,
         errorType: scenario === "logout" ? "authentication_error" : "server_error",

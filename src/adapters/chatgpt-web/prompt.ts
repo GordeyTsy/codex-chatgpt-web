@@ -585,6 +585,7 @@ export function compileChatGptWebPrompt(
     ? [
       "<codex_transport_resume>",
       `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
+      "Copy that exact transport token character for character from this footer. Never reconstruct it from memory or use a token from earlier task history. An unsuccessful capability claim executes no task action; consult this footer before continuing, and wait for every tool reply before writing your final answer.",
       "</codex_transport_resume>",
     ]
     : [

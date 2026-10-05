@@ -2,6 +2,7 @@ import { waitForLauncherAuthentication } from "../../launcher-browser-host";
 import { installAutolinkRenderCompatibility } from "./autolink-render-compat";
 import { ChatGptMessageDeliveryRecovery } from "./message-delivery-recovery";
 import { captureChatGptTimeoutPage } from "./timeout-page-snapshot";
+import { assertChatGptBindingCompletion, ChatGptBindingAnswerBuffer } from "./binding-failure";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -5487,9 +5488,14 @@ export class ChatGptBrowserWorker {
       const checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
         : undefined;
+      const bindingAnswer = mode.localTools && !turn.compaction ? new ChatGptBindingAnswerBuffer() : undefined;
+      const emitVisibleDelta = (delta: string): void => {
+        const visible = bindingAnswer ? bindingAnswer.observe(delta) : delta;
+        if (visible) turn.onTextDelta(visible);
+      };
       const emitMarkdownDelta = (delta: string): void => {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
-        if (visible) turn.onTextDelta(visible);
+        if (visible) emitVisibleDelta(visible);
       };
       const throwMarkdownConsistencyError = (error: unknown): never => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
@@ -5685,6 +5691,9 @@ export class ChatGptBrowserWorker {
           });
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
+            // Validate before committing the terminal fence. The owner-issued capability
+            // stays alive for same-turn recovery; no rejected call is executed or rebound.
+            if (bindingAnswer) assertChatGptBindingCompletion(snapshot.visibleText);
             if (turn.completionFence) {
               if (completionFenceRevision === undefined) {
                 const revision = await turn.completionFence.begin();
@@ -5725,13 +5734,15 @@ export class ChatGptBrowserWorker {
             if (final.delta) emitMarkdownDelta(final.delta);
             if (checkpointStream) {
               const completed = checkpointStream.finishOptional(snapshot.visibleText);
-              if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
+              if (completed.visibleRemainder) emitVisibleDelta(completed.visibleRemainder);
               if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
             } else {
               finalText = final.markdown;
             }
+            const heldAnswer = bindingAnswer?.finish();
+            if (heldAnswer) turn.onTextDelta(heldAnswer);
             break;
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 60_000) {
