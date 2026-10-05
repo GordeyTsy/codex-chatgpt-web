@@ -549,6 +549,14 @@ export function createChatGptWebAdapter(
               emptyRecoveries = productive ? 0 : emptyRecoveries + 1;
               if (emptyRecoveries > MAX_CHATGPT_WEB_TURN_RETRIES) throw error;
             }
+            // A vanished browser is not proof that an outer command has ended.
+            // Keep its capability alive and await native result delivery before
+            // compiling another conversation, including after owner login.
+            let pending = progress?.snapshot();
+            while (pending && pending.activeToolCalls > 0) {
+              pending = await progress!.waitForChange(pending.revision, browserAbort.signal);
+            }
+            browserAbort.signal.throwIfAborted();
             console.info(`[chatgpt-web] model_progress_recovery trace=${traceId} nextAttempt=${attempt + 1} emptyRecoveries=${emptyRecoveries}`);
             trace.push({ kind: "commentary", text: "Recovering an inactive ChatGPT conversation from saved progress." });
           } finally { clearInterval(interval); }
