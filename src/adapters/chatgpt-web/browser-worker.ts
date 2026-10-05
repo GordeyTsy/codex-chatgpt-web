@@ -1566,14 +1566,18 @@ export function chatGptReboundTurnIdentity(
 
 export class ChatGptCompletionTracker {
   private candidate?: { signature: string; since: number };
-  private lastToolBatchRevision = 0;
   private postToolAnswerBaselineText?: string;
   private missingPostToolAnswerSince?: number;
 
   constructor(
     private readonly stableMs = CHATGPT_COMPLETION_SETTLE_MS,
     private readonly missingPostToolAnswerMs = CHATGPT_COMPLETION_ACTION_GRACE_MS,
-  ) {}
+    private lastToolBatchRevision = 0,
+  ) {
+    if (!Number.isSafeInteger(lastToolBatchRevision) || lastToolBatchRevision < 0) {
+      throw new Error("ChatGPT completion received an invalid initial tool-batch revision");
+    }
+  }
 
   needsToolBatchObservation(revision: number): boolean {
     if (!Number.isSafeInteger(revision) || revision < this.lastToolBatchRevision) {
@@ -3912,7 +3916,11 @@ export class ChatGptBrowserWorker {
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
     completionTracker = new ChatGptCompletionTracker(),
+    initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
   ): Promise<void> {
+    // Recovery preserves logical-turn progress across physical conversations. Completed batches
+    // from the old page are history, not a pre-tool answer boundary for this inert context stage.
+    // Still observe any new batch arriving after this stage starts and veto in-flight completion.
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
     // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
     // dedicated multipart acknowledgement budget back down after that transient shell appears.
@@ -3953,6 +3961,7 @@ export class ChatGptBrowserWorker {
       const externalProgressSnapshot = externalProgress?.snapshot();
       if (externalProgress
         && externalProgressSnapshot
+        && externalProgressSnapshot.lastToolBatchRevision > initialToolBatchRevision
         && completionTracker.needsToolBatchObservation(externalProgressSnapshot.lastToolBatchRevision)) {
         completionTracker.observeToolBatch(
           externalProgressSnapshot.lastToolBatchRevision,
@@ -4951,6 +4960,7 @@ export class ChatGptBrowserWorker {
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
       throw new Error("Tool-capable ChatGPT turns require both progress and terminal-fence transports");
     }
+    const initialToolBatchRevision = turn.externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     if ((turn.captureLunaCheckpoint === true) !== (turn.onLunaCheckpoint !== undefined)) {
       throw new Error("ChatGPT Luna checkpoint capture requires exactly one checkpoint callback");
     }
@@ -5348,6 +5358,8 @@ export class ChatGptBrowserWorker {
                 deadline,
                 acknowledgementSignal,
                 turn.externalProgress,
+                undefined,
+                initialToolBatchRevision,
               );
             },
             chatGptSuspensionClock,
@@ -5450,7 +5462,7 @@ export class ChatGptBrowserWorker {
         this.attachFiles(page, prepared)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
-      const completionTracker = new ChatGptCompletionTracker();
+      const completionTracker = new ChatGptCompletionTracker(undefined, undefined, initialToolBatchRevision);
       const recordFinalUsage = await usageSubmission();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,

@@ -4,13 +4,17 @@ import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultChromeExecutable } from "../src/config";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptCompletionTracker } from "../src/adapters/chatgpt-web/browser-worker";
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
 // Isolated DOM fixture: real Chromium, real response projection and terminal fence path;
 // model selection/submission setup is test-only and does not invoke a provider.
-test.each([true, false])("browser binding verdict precedes fence retirement and final text (failure=%s)", async failure => {
+test.each([
+  { failure: true, historicalTools: false },
+  { failure: false, historicalTools: false },
+  { failure: false, historicalTools: true },
+])("browser binding verdict precedes fence retirement and final text (%j)", async ({ failure, historicalTools }) => {
   const diagnostics = mkdtempSync(join(tmpdir(), "binding-browser-"));
   const browser = await chromium.launch({ executablePath: defaultChromeExecutable(), headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"] });
@@ -34,11 +38,17 @@ test.each([true, false])("browser binding verdict precedes fence retirement and 
     waitForNewAssistantTurn: async () => ({ locator: page.locator("article"), identity: "current" }),
   });
   let begins = 0, commits = 0, text = "";
+  const progress = new ChatGptExternalTurnProgress();
+  if (historicalTools) {
+    const batch = progress.recordToolBatch(73);
+    await progress.acknowledgeToolBatch(batch);
+    for (let index = 0; index < 73; index++) progress.recordToolResult();
+  }
   try {
     const result = worker.runBrowserTurn({
       traceId: "binding_fixture", modelId: "gpt-5.6-sol", reasoning: "xhigh", capabilities,
       prepare: async () => ({ text: "Isolated test context", images: [], release: () => {} }),
-      onTextDelta: (delta: string) => { text += delta; }, externalProgress: new ChatGptExternalTurnProgress(),
+      onTextDelta: (delta: string) => { text += delta; }, externalProgress: progress,
       completionFence: { begin: async () => { begins++; return 1; }, commit: async () => { commits++; return true; } },
     }, undefined, page);
     if (failure) {
@@ -49,6 +59,35 @@ test.each([true, false])("browser binding verdict precedes fence retirement and 
     }
   } finally { await browser.close(); rmSync(diagnostics, { recursive: true, force: true }); }
 }, 45_000);
+
+// Real browser + production staging reader/timer. Setup is isolated and invokes no model.
+test("recovered multipart confirmation completes in a real browser with 73 historical tool results", async () => {
+  const browser = await chromium.launch({ executablePath: defaultChromeExecutable(), headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+  const page = await browser.newPage();
+  const progress = new ChatGptExternalTurnProgress();
+  const batch = progress.recordToolBatch(73);
+  await progress.acknowledgeToolBatch(batch);
+  for (let index = 0; index < 73; index++) progress.recordToolResult();
+  let repeatedAcknowledgements = 0;
+  const originalAcknowledge = progress.acknowledgeToolBatch.bind(progress);
+  progress.acknowledgeToolBatch = async revision => {
+    repeatedAcknowledgements++;
+    await originalAcknowledge(revision);
+  };
+  await page.setContent('<article data-message-author-role="assistant" data-message-id="stage-2">'
+    + '<div class="markdown"><p>CONTEXT_ACK_2</p></div>'
+    + '<button data-testid="copy-turn-action-button">Copy</button></article>');
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  try {
+    await worker.waitForMultipartAcknowledgement(page,
+      { locator: page.locator("article"), identity: "stage-2" }, {},
+      { acknowledgement: "CONTEXT_ACK_2" }, Date.now() + 3_000, undefined, progress,
+      new ChatGptCompletionTracker(0, 50));
+    expect(repeatedAcknowledgements).toBe(0);
+    expect(progress.snapshot()).toMatchObject({ revision: 74, lastToolBatchRevision: batch, activeToolCalls: 0 });
+  } finally { await browser.close(); }
+}, 15_000);
 
 // Real browser + production staging reader/timer. Setup is isolated and invokes no model.
 test.each([false, true])("multipart stall keeps final tools unsent and preserves owner cancellation (cancel=%s)", async cancel => {

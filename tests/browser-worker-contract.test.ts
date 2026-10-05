@@ -4154,6 +4154,58 @@ test("multipart observation surfaces Stopped thinking on its first observation e
   expect(acknowledged).toBeFalse();
 });
 
+test.each([false, true])("multipart acknowledgement ignores only pre-existing completed tools (newBatch=%s)", async newBatch => {
+  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { locator: { getByText: () => absent, getByTestId: () => absent } };
+  let revision = 73;
+  const acknowledged: number[] = [];
+  const progress = {
+    snapshot: () => ({ revision: revision + 73, lastToolBatchRevision: revision, activeToolCalls: 0, lastProgressAt: Date.now() }),
+    acknowledgeToolBatch: async (value: number) => { acknowledged.push(value); },
+  };
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+  const result = observe.call({ responseDomSnapshot: async () => {
+    if (newBatch) revision = 74;
+    return { responsePresent: true, stoppedThinkingVisible: false, visibleText: "CONTEXT_ACK_2", fullHtml: "ack",
+      completionActionVisible: true };
+  } }, page, binding, {}, { acknowledgement: "CONTEXT_ACK_2" }, Date.now() + 2_000, undefined, progress,
+  new ChatGptCompletionTracker(0, 50));
+  if (newBatch) {
+    await expect(result).rejects.toThrow("without producing a final answer after its last Codex tool call");
+    expect(acknowledged).toEqual([74]);
+  } else {
+    await result;
+    expect(acknowledged).toEqual([]);
+  }
+});
+
+test("a recovered completion tracker starts after historical batches without requiring a new tool answer", () => {
+  const tracker = new ChatGptCompletionTracker(0, 50, 73);
+  expect(tracker.needsToolBatchObservation(73)).toBeFalse();
+  expect(tracker.needsToolBatchObservation(74)).toBeTrue();
+  const state = { responsePresent: true, running: false, currentText: "Recovered final answer",
+    currentHtml: "answer", completionActionVisible: true };
+  expect(tracker.update(state, 0)).toBeFalse();
+  expect(tracker.update(state, 1)).toBeTrue();
+  expect(tracker.update({ ...state, externalToolCallsInFlight: true }, 2)).toBeFalse();
+  for (const invalid of [-1, Number.NaN, 0.5]) expect(() => new ChatGptCompletionTracker(0, 50, invalid)).toThrow();
+});
+
+test("multipart acknowledgement still rejects an incorrect confirmation with completed tool history", async () => {
+  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+  await expect(observe.call({ responseDomSnapshot: async () => ({ responsePresent: true,
+    stoppedThinkingVisible: false, visibleText: "WRONG_ACK", fullHtml: "wrong", completionActionVisible: true }) },
+    { isClosed: () => false, locator: () => absent },
+    { locator: { getByText: () => absent, getByTestId: () => absent } }, {},
+    { acknowledgement: "CONTEXT_ACK_2" }, Date.now() + 2_000, undefined,
+    { snapshot: () => ({ revision: 146, lastToolBatchRevision: 73, activeToolCalls: 0, lastProgressAt: Date.now() }),
+      acknowledgeToolBatch: async () => { throw new Error("Historical tools must not be acknowledged again"); } },
+    new ChatGptCompletionTracker(0, 50),
+  )).rejects.toMatchObject({ code: "multipart_protocol_violation" });
+});
+
 test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {
   // The classifier runs inside page.evaluate, so it cannot be imported. Extract and execute the
   // exact shipped source so the test covers the code that actually runs.
