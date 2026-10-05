@@ -835,6 +835,8 @@ export function startServer(
     saveConfig({ ...current, ...(available ? { proAvailable: true } : {}), proSelectable: available });
     if (available) config.proAvailable = true;
     config.proSelectable = available;
+    // Owner-managed per-thread fallback may change when a coordinator is registered.
+    config.proQuotaFallbackThreadIds = current.proQuotaFallbackThreadIds;
   };
   const adapterFactory = dependencies.adapterFactory ?? ((provider: Parameters<ChatGptWebAdapterFactory>[0]) =>
     createChatGptWebAdapter(provider, { onProUnavailable: () => {
