@@ -6,7 +6,8 @@ test("model selection recognizes Latest in the launcher languages without accept
     ["Latest", true], ["最新", true], ["최신", true], ["GPT-6 Pro", true],
     ["GPT-5.6 Sol", false], ["GPT-7 Pro", false], ["Latest preview", false],
   ] as const) {
-    const menu = { menu: {
+    const sliderContainer = { filter: () => sliderContainer, locator: () => sliderContainer, count: async () => 1 };
+    const menu = { sliderContainer, menu: {
       getByRole: (_role: string, options: { name: RegExp }) => ({
         count: async () => options.name.test(label) ? 1 : 0,
         getAttribute: async () => "true",

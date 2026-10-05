@@ -1,0 +1,79 @@
+<!doctype html>
+<style>
+  #picker { position: relative; width: 420px; height: 240px; }
+  .track { position: absolute; inset: 0; }
+  [data-active="false"] { opacity: 0; pointer-events: none; }
+  [role="menuitem"], [role="menuitemradio"] { min-height: 36px; }
+</style>
+<form><div id="prompt-textarea" contenteditable="true">Preserved draft 😀</div>
+  <button type="button" data-tone="neutral" aria-haspopup="menu" aria-controls="picker" aria-expanded="false">High</button>
+</form>
+<div id="picker" role="menu" hidden>
+  <div data-model-picker-view="simple">
+    <div class="track" id="power" aria-hidden="false" data-active="true">
+      <!-- The real site puts aria-hidden on the view, not on this row. -->
+      <div role="menuitem" tabindex="0" aria-label="Select model" data-model-picker-view-toggle="true">
+        <span data-menu-row-content><span id="version"></span> <span id="effort"></span></span>
+      </div>
+      <span id="status" role="status"></span>
+      <div role="menuitem" tabindex="0" aria-describedby="status" aria-label="Power">
+        <div data-model-picker-power-slider style="height:36px;width:300px"></div>
+      </div>
+    </div>
+    <!-- Inert items retain layout and pass Playwright's isVisible(). -->
+    <div class="track" id="models" aria-hidden="true" data-active="false" inert>
+      <div role="menuitemradio" tabindex="0" aria-checked="true">Latest</div>
+      <div role="menuitemradio" tabindex="0" aria-checked="false">GPT-5.6 Sol</div>
+    </div>
+  </div>
+</div>
+<script>
+  const options = window.pickerConfig;
+  const names = ["Instant", "Medium", "High", "Extra High", "Pro"];
+  let family = options.family, value = options.value, opens = 0;
+  const control = document.querySelector("button"), picker = document.querySelector("#picker");
+  window.pickerActions = [];
+  function show(view) {
+    picker.querySelector("[data-model-picker-view]").setAttribute("data-model-picker-view", view);
+    for (const [id, active] of [["power", view === "simple"], ["models", view === "advanced"]]) {
+      const el = document.getElementById(id);
+      el.setAttribute("aria-hidden", String(!active));
+      el.setAttribute("data-active", String(active));
+      el.toggleAttribute("inert", !active);
+    }
+  }
+  function render() {
+    const min = options.min || 0, max = options.max === undefined ? 4 : options.max;
+    const version = family === "6" && value === 4 ? "6" : "5.6";
+    document.querySelector("#version").textContent = version;
+    document.querySelector("#effort").textContent = names[value];
+    document.querySelector("#status").textContent = (options.versioned ? version + " " : "") + names[value] + ", " + (value + 1) + " of " + (max + 1) + ".";
+    document.querySelector("[data-model-picker-power-slider]").innerHTML = '<span data-orientation="horizontal" aria-disabled="false">'
+      + Array.from({length:max + 1}, (_, i) => '<span data-selected="' + (i <= value) + '" data-locked="' + (i === options.locked) + '"></span>').join("")
+      + '<span role="slider" aria-hidden="true" aria-valuemin="' + min + '" aria-valuemax="' + (min + max) + '" aria-valuenow="' + (min + value) + '"></span></span>';
+    picker.querySelectorAll('[role="menuitemradio"]').forEach((el, i) => el.setAttribute("aria-checked", String(i === (family === "6" ? 0 : 1))));
+  }
+  function close() {
+    picker.hidden = true; control.setAttribute("aria-expanded", "false"); control.textContent = (family === "6" && value === 4 ? "6" : "5.6") + " " + names[value];
+  }
+  control.onclick = () => {
+    picker.hidden = false; control.setAttribute("aria-expanded", "true"); control.textContent = "Thinking effort";
+    show(options.direct && opens++ === 0 ? "advanced" : "simple"); render();
+  };
+  document.querySelector('[data-model-picker-view-toggle]').onclick = () => { window.pickerActions.push("open-models"); show("advanced"); };
+  picker.querySelectorAll('[role="menuitemradio"]').forEach((el, i) => el.onclick = () => {
+    window.pickerActions.push("select-family:" + (i === 0 ? "6" : "5.6"));
+    if (!options.ignoreFamily) family = i === 0 ? "6" : "5.6";
+    render(); show("simple");
+    if (options.closeOnFamily) close();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") close();
+    if (!document.getElementById("power").inert && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
+      const max = options.max === undefined ? 4 : options.max;
+      value = Math.max(0, Math.min(max, value + (event.key === "ArrowRight" ? 1 : -1) * (options.jump || 1)));
+      window.pickerActions.push(event.key); render(); event.preventDefault();
+    }
+  });
+  render(); close();
+</script>

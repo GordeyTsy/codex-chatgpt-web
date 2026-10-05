@@ -1,6 +1,7 @@
 import { activateChatGptEffortMenu, parseChatGptEffortSliderState, readChatGptModelAnnouncements } from "../../chatgpt-session";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import type { Locator } from "playwright-core";
 
 type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
 
@@ -21,6 +22,14 @@ function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
   });
 }
 
+function activeModelItem(locator: Locator): Locator {
+  // Both views keep their layout during the slide animation. Playwright visibility
+  // alone therefore includes the inert model list behind the active power slider.
+  return locator.filter({ visible: true }).locator(
+    'xpath=self::*[not(ancestor-or-self::*[@aria-hidden="true" or @inert or @hidden or @data-active="false"])]',
+  );
+}
+
 /** Model and effort are separate browser controls; a generic Pro label proves neither family. */
 export async function selectChatGptModelFamily(
   menu: EffortMenu,
@@ -30,27 +39,31 @@ export async function selectChatGptModelFamily(
   try {
     const option = familyOption(menu, family);
     if (await option.count() > 1) throw familyError(family);
-    if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true") return menu;
-    if (await option.count() === 0 || !await option.isVisible().catch(() => false)) {
+    if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true"
+      && await activeModelItem(menu.sliderContainer).count() === 1) return menu;
+    const activeOption = activeModelItem(option);
+    if (await option.count() === 0 || await activeOption.count() !== 1) {
       // The attached radio rows are inert while this composer-owned advanced view is collapsed.
       const powerView = menu.menu.locator('[data-model-picker-view]');
       if (await powerView.count() === 1) {
         const view = await powerView.getAttribute("data-model-picker-view");
         if (view === "simple") {
-          const trigger = powerView.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]');
+          // The current picker marks the containing view, rather than this row,
+          // aria-hidden=false. Ignore outgoing/inert views during its animation.
+          const trigger = activeModelItem(powerView.locator('[data-model-picker-view-toggle="true"]'));
           if (await trigger.count() === 1) {
             await trigger.click({ timeout: 5_000 });
           }
         }
       } else {
-        const trigger = menu.menu.locator('[role="menuitem"][aria-expanded][aria-hidden="false"]');
+        const trigger = activeModelItem(menu.menu.locator('[role="menuitem"][aria-expanded]'));
         if (await powerView.count() === 0 && await trigger.count() === 1) {
           if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000 });
         }
       }
     }
-    await option.waitFor({ state: "visible", timeout: 5_000 });
-    await option.click({ timeout: 5_000 });
+    await activeOption.waitFor({ state: "visible", timeout: 5_000 });
+    await activeOption.click({ timeout: 5_000 });
     // Choosing a family returns the open picker to its slider. Keep that surface:
     // Escape followed by an immediate reopen races the outgoing menu's cleanup.
     // Activation reuses the open menu and verifies its owner before returning it.
