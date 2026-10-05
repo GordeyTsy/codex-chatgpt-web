@@ -95,6 +95,7 @@ import {
   ChatGptWebAdapterError,
   chatGptBrowserTabClosedError,
   chatGptAssistantDomUnavailableError,
+  chatGptMultipartAcknowledgementTimeoutError,
   chatGptRetainedConversationUnavailableError,
   chatGptStoppedThinkingError,
 } from "./adapter-error";
@@ -2143,8 +2144,9 @@ class ChatGptBrowserDiagnostics {
     }
   }
 
-  async captureModelTimeout(page: Page, reason: "chatgpt_model_no_progress" | "chatgpt_assistant_dom_unavailable" = "chatgpt_model_no_progress"): Promise<void> {
-    const checkpoint = reason === "chatgpt_model_no_progress" ? "model-progress-timeout" : "assistant-dom-unavailable";
+  async captureModelTimeout(page: Page, reason: "chatgpt_model_no_progress" | "chatgpt_assistant_dom_unavailable" | "chatgpt_multipart_acknowledgement_timeout" = "chatgpt_model_no_progress"): Promise<void> {
+    const checkpoint = reason === "chatgpt_model_no_progress" ? "model-progress-timeout"
+      : reason === "chatgpt_assistant_dom_unavailable" ? "assistant-dom-unavailable" : "multipart-acknowledgement-timeout";
     await this.capture(page, checkpoint);
     try {
       const stem = join(this.directory, `${String(++this.sequence).padStart(2, "0")}-${checkpoint}-private`);
@@ -2560,6 +2562,7 @@ export class ChatGptBrowserWorker {
     action: (abortSignal: AbortSignal) => Promise<T>,
     suspensionClock: Pick<ChatGptSuspensionClock, "suspendedMs"> = chatGptSuspensionClock,
     awaitAbortedActionSettlement = false,
+    timeoutError: () => Error = () => new Error(`ChatGPT browser stage timed out: ${stage}`),
   ): Promise<T> {
     chatGptSuspensionClock.start();
     const startedAt = performance.now();
@@ -2582,7 +2585,7 @@ export class ChatGptBrowserWorker {
           }
           stageTimedOut = true;
           controller.abort();
-          rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
+          rejectTimeout(timeoutError());
         };
         timer = setTimeout(fireOrRearm, timeoutMs);
       });
@@ -5340,6 +5343,10 @@ export class ChatGptBrowserWorker {
               );
             },
             chatGptSuspensionClock,
+            // Only this acknowledged inert-send boundary is safe to rebuild. Settle the
+            // aborted reader before releasing its surface; never resend the final task here.
+            true,
+            () => chatGptMultipartAcknowledgementTimeoutError(index + 1),
           );
           const stageRejection = await submissionRejection.failure();
           if (stageRejection) throw stageRejection;
@@ -5838,6 +5845,8 @@ export class ChatGptBrowserWorker {
           await diagnostics.captureModelTimeout(diagnosticPage);
         } else if (error instanceof ChatGptWebAdapterError && error.code === "chatgpt_assistant_dom_unavailable") {
           await diagnostics.captureModelTimeout(diagnosticPage, "chatgpt_assistant_dom_unavailable");
+        } else if (error instanceof ChatGptWebAdapterError && error.code === "chatgpt_multipart_acknowledgement_timeout") {
+          await diagnostics.captureModelTimeout(diagnosticPage, "chatgpt_multipart_acknowledgement_timeout");
         } else {
           await diagnostics.capture(diagnosticPage, "turn-failed", error);
         }

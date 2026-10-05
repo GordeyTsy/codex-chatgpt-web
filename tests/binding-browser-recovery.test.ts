@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { chromium } from "playwright-core";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultChromeExecutable } from "../src/config";
@@ -47,5 +47,66 @@ test.each([true, false])("browser binding verdict precedes fence retirement and 
     } else {
       expect(await result).toBe(answer); expect(text).toBe(answer); expect(commits).toBe(1);
     }
+  } finally { await browser.close(); rmSync(diagnostics, { recursive: true, force: true }); }
+}, 45_000);
+
+// Real browser + production staging reader/timer. Setup is isolated and invokes no model.
+test.each([false, true])("multipart stall keeps final tools unsent and preserves owner cancellation (cancel=%s)", async cancel => {
+  const diagnostics = mkdtempSync(join(tmpdir(), "multipart-stall-browser-"));
+  const browser = await chromium.launch({ executablePath: defaultChromeExecutable(), headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+  const page = await browser.newPage();
+  await page.setContent('<main></main><div data-testid="prompt-textarea" contenteditable="true"></div>');
+  const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const owner = new AbortController();
+  let finalSends = 0, toolAttachments = 0, stageSends = 0, released = false, readerEntered = false;
+  const worker: any = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { appName: "Codex Native", autoApproveToolCalls: false, browserDiagnosticsPath: diagnostics,
+      modelProgressTimeoutMs: 300_000, turnTimeoutMs: 30_000 },
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async (_page: unknown, model: string, effort: string) => resolveChatGptWebModelMode(model, effort, capabilities),
+    attachPrompt: async (_page: unknown, _text: string, tools: boolean) => { if (tools) toolAttachments++; },
+    attachPromptWithCompactionRetry: async () => { toolAttachments++; },
+    attachFiles: async () => {},
+    runStage: (...args: any[]) => {
+      if (args[1].endsWith("_acknowledgement")) args[2] = 5_000;
+      return (ChatGptBrowserWorker.prototype as any).runStage.apply(worker, args);
+    },
+    waitForMultipartAcknowledgement: (...args: any[]) => {
+      readerEntered = true;
+      if (cancel) owner.abort(new DOMException("Owner stopped task", "AbortError"));
+      return (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement.apply(worker, args);
+    },
+    sendAttachedPrompt: async (_page: unknown, baseline: any) => {
+      stageSends++;
+      await page.locator("main").evaluate((node, prompt) => {
+        node.innerHTML = '<section data-turn-id-container="submitted"><article data-testid="conversation-turn-0" data-message-author-role="user" data-turn-id="submitted"></article></section>'
+          + '<section data-turn-id-container="staging"><article data-testid="conversation-turn-1" data-message-author-role="assistant" data-turn-id="staging"><div class="markdown"></div></article></section>'
+          + '<button data-testid="stop-button" onclick="this.remove()">Stop</button>';
+        node.querySelector("article")!.textContent = prompt;
+      }, baseline.submittedText);
+      return "user_turn";
+    },
+  });
+  try {
+    const run = worker.runBrowserTurn({ traceId: "multipart_stall_fixture", modelId: "gpt-5.6-sol", reasoning: "xhigh", capabilities,
+      abortSignal: owner.signal, externalProgress: new ChatGptExternalTurnProgress(),
+      completionFence: { begin: async () => { throw new Error("No final task may start during staging"); }, commit: async () => false },
+      onSendActivated: () => { finalSends++; }, onTextDelta: () => {},
+      prepare: async () => ({ text: "Isolated context", images: [],
+        multipart: { parts: ['{"part":1}', '{"part":2}'], commit: "Continue fixture" }, release: () => { released = true; } }),
+    }, undefined, page);
+    if (cancel) await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    else {
+      await expect(run).rejects.toMatchObject({ code: "chatgpt_multipart_acknowledgement_timeout", retryable: false });
+      const traceDir = join(diagnostics, readdirSync(diagnostics)[0]!);
+      const captures = readdirSync(traceDir).filter(name => name.endsWith(".capture.json"));
+      expect(captures).toHaveLength(1);
+      expect(JSON.parse(readFileSync(join(traceDir, captures[0]!), "utf8"))).toMatchObject({
+        reason: "chatgpt_multipart_acknowledgement_timeout", saved: ["png", "html", "txt", "page.json"], failed: [],
+      });
+    }
+    expect(readerEntered).toBeTrue(); expect(stageSends).toBe(1); expect(finalSends).toBe(0); expect(toolAttachments).toBe(0); expect(released).toBeTrue();
+    expect(await page.locator('[data-testid="stop-button"]').count()).toBe(0);
   } finally { await browser.close(); rmSync(diagnostics, { recursive: true, force: true }); }
 }, 45_000);

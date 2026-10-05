@@ -38,6 +38,14 @@ export function chatGptAssistantDomUnavailableError(message: string, cause?: unk
   });
 }
 
+/** Only an inert context part was sent; the task commit and tool attachment have not run. */
+export function chatGptMultipartAcknowledgementTimeoutError(part: number): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `ChatGPT did not acknowledge inert context part ${part} before its stage deadline.`,
+    { status: 504, errorType: "server_error", code: "chatgpt_multipart_acknowledgement_timeout", retryable: false },
+  );
+}
+
 // Only the compaction owner may signal this after the broker accepts its one-shot handoff.
 // It cancels browser observation, while the accepted summary remains the native result.
 export class ChatGptCompactionHandoffAccepted extends DOMException {

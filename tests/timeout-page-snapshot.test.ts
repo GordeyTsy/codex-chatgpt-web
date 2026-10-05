@@ -24,7 +24,7 @@ test("timeout evidence saves private page artifacts without exporting their cont
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test.each(["chatgpt_model_no_progress", "chatgpt_assistant_dom_unavailable"] as const)("closed or broken page records %s capture and permits cleanup", async reason => {
+test.each(["chatgpt_model_no_progress", "chatgpt_assistant_dom_unavailable", "chatgpt_multipart_acknowledgement_timeout"] as const)("closed or broken page records %s capture and permits cleanup", async reason => {
   const directory = mkdtempSync(join(tmpdir(), "cgw-timeout-partial-"));
   try {
     const stem = join(directory, "trace-timeout");

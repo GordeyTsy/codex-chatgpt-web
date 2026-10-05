@@ -526,7 +526,8 @@ export function createChatGptWebAdapter(
             const authentication = error instanceof ChatGptWebAdapterError
               && ["chatgpt_session_expired", "chatgpt_sign_in_required"].includes(error.code);
             const recoverable = error instanceof ChatGptWebAdapterError
-              && (["chatgpt_model_no_progress", "chatgpt_message_delivery_timeout", "chatgpt_turn_token_mismatch"].includes(error.code)
+              && (["chatgpt_model_no_progress", "chatgpt_message_delivery_timeout", "chatgpt_turn_token_mismatch",
+                "chatgpt_multipart_acknowledgement_timeout"].includes(error.code)
                 || (error.code === "chatgpt_assistant_dom_unavailable" && submission.phase === "accepted"));
             if ((!authentication && !recoverable) || browserAbort.signal.aborted) throw error;
             // Capture and release the old surface before taking a new lease. The MCP capability

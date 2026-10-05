@@ -3,7 +3,7 @@ import { atomicWriteFile } from "../../config";
 
 /** Private local evidence only. Capture failures must never prevent turn cleanup. */
 export async function captureChatGptTimeoutPage(page: Page, stem: string,
-  reason: "chatgpt_model_no_progress" | "chatgpt_assistant_dom_unavailable" = "chatgpt_model_no_progress",
+  reason: "chatgpt_model_no_progress" | "chatgpt_assistant_dom_unavailable" | "chatgpt_multipart_acknowledgement_timeout" = "chatgpt_model_no_progress",
 ): Promise<void> {
   const bounded = async <T>(operation: Promise<T>): Promise<T> => {
     let timer: ReturnType<typeof setTimeout>;

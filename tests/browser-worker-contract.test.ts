@@ -7,7 +7,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail, chatGptRequestedModeUnavailableError } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { chatGptStoppedThinkingError, chatGptMultipartAcknowledgementTimeoutError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -4445,6 +4445,25 @@ test("a staged Bigger Context part gets an acknowledgement window sized to its p
   expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBe(browserStageTimeouts.multipartStageSend);
   expect(browserStageTimeouts.multipartStageAcknowledgement).toBe(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS);
 
+});
+
+test("inert acknowledgement timeout waits for aborted reader cleanup and ordinary Send timeouts remain distinct", async () => {
+  const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://inert-ack-stage-${Date.now()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    runStage<T>(id: string, stage: string, timeoutMs: number, action: (signal: AbortSignal) => Promise<T>,
+      clock: { suspendedMs(): number }, settle: boolean, timeoutError?: () => Error): Promise<T>;
+  };
+  let cleaned = false;
+  await expect(worker.runStage("inert-ack", "multipart_stage_1_acknowledgement", 20,
+    signal => new Promise<never>((_, reject) => signal.addEventListener("abort", async () => {
+      await Bun.sleep(30); cleaned = true; reject(new DOMException("staging aborted", "AbortError"));
+    }, { once: true })), { suspendedMs: () => 0 }, true,
+    () => chatGptMultipartAcknowledgementTimeoutError(1)))
+    .rejects.toMatchObject({ code: "chatgpt_multipart_acknowledgement_timeout", retryable: false });
+  expect(cleaned).toBeTrue();
+  await expect(worker.runStage("inert-ack", "send", 20, () => new Promise<never>(() => {}),
+    { suspendedMs: () => 0 }, false)).rejects.toThrow("ChatGPT browser stage timed out: send");
 });
 
 test("the suspension clock charges only tick gaps that mean the process was frozen", () => {

@@ -18,10 +18,19 @@ helper IPC boundary. An explicit caller deadline still takes precedence.
 
 Missing assistant identity or exhausted same-page observation rebinds produce
 `chatgpt_assistant_dom_unavailable`. The bridge recovers this failure only after
-the task submission was confirmed. Multipart staging and ambiguous sends do not
-authorize replay. A fresh conversation retains the same native turn, capability
+the task submission was confirmed. Ambiguous sends do not authorize replay.
+A fresh conversation retains the same native turn, capability
 and completed results. This diagnostic also saves private page artifacts with
 the `assistant-dom-unavailable` checkpoint and its own capture reason.
+
+An accepted inert Bigger Context part has a separate acknowledgement deadline.
+If that deadline expires before the final task commit is sent, the helper settles
+its aborted reader and returns `chatgpt_multipart_acknowledgement_timeout`. The
+bridge can rebuild that context transaction in a fresh conversation under the same
+native turn and consecutive-empty recovery budget. It retains completed tool
+results even when this happens during another recovery. Final task Send timeouts,
+acknowledgement mismatches and explicit cancellation do not use this recovery.
+Private page evidence uses the `multipart-acknowledgement-timeout` checkpoint.
 
 The bridge captures the inactive page, aborts and physically releases its surface,
 then opens a fresh Web conversation inside the same native Codex turn. It keeps

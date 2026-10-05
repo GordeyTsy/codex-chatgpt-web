@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
-import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptWebAdapterError, chatGptStoppedThinkingError, chatGptMultipartAcknowledgementTimeoutError } from "../src/adapters/chatgpt-web/adapter-error";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
@@ -475,7 +475,7 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
-  test.each(["inactivity", "logout", "delivery", "binding", "missing-dom"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
+  test.each(["inactivity", "logout", "delivery", "binding", "missing-dom", "missing-dom-then-multipart"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
     const socketPath = brokerTestEndpoint(`cgw-result-recovery-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://result-recovery-${Date.now()}`,
       chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, modelProgressTimeoutMs: 60,
@@ -486,10 +486,17 @@ describe("ChatGPT outer-native harness v4", () => {
     const tokens: string[] = [];
     let invocations = 0;
     worker.run = async turn => {
-      const prepared = await turn.prepare(); prepared.release(); turn.onSubmitted?.();
+      const prepared = await turn.prepare(); prepared.release();
       const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)![1]!;
       tokens.push(token);
-      if (tokens.length === 2) {
+      if (scenario === "missing-dom-then-multipart" && tokens.length === 2) {
+        // The first fresh conversation only received an inert context part. No task Send
+        // or completed tool invocation is allowed to run a second time.
+        expect(prepared.text).toContain("CONFIRMED_EFFECT_RECEIPT");
+        throw chatGptMultipartAcknowledgementTimeoutError(1);
+      }
+      turn.onSubmitted?.();
+      if (tokens.length >= 2) {
         expect(prepared.text).toContain("CONFIRMED_EFFECT_RECEIPT");
         expect(prepared.text).toContain("Do not repeat completed effects");
         expect(token).toBe(tokens[0]);
@@ -506,7 +513,7 @@ describe("ChatGPT outer-native harness v4", () => {
         status: scenario === "logout" ? 401 : 502,
         errorType: scenario === "logout" ? "authentication_error" : "server_error",
         code: scenario === "logout" ? "chatgpt_sign_in_required"
-          : scenario === "missing-dom" ? "chatgpt_assistant_dom_unavailable" : "chatgpt_message_delivery_timeout", retryable: false,
+          : scenario.startsWith("missing-dom") ? "chatgpt_assistant_dom_unavailable" : "chatgpt_message_delivery_timeout", retryable: false,
       });
       return new Promise<string>((_, reject) => {
         turn.abortSignal!.addEventListener("abort", () => reject(turn.abortSignal!.reason), { once: true });
@@ -536,7 +543,7 @@ describe("ChatGPT outer-native harness v4", () => {
       await Promise.all([completion, staleReplay]);
       expect(final.at(-1)?.type).toBe("done");
       expect(final.some(event => event.type === "error" || event.type === "tool_call_start")).toBeFalse();
-      expect(invocations).toBe(1); expect(tokens).toHaveLength(2);
+      expect(invocations).toBe(1); expect(tokens).toHaveLength(scenario === "missing-dom-then-multipart" ? 3 : 2);
     } finally { worker.run = originalRun; worker.waitForAuthentication = originalWait; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
@@ -559,6 +566,26 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(starts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 1);
       expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_model_no_progress" });
     } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
+  test("inert context acknowledgement timeouts rebuild before task Send but cannot retry forever", async () => {
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://inert-ack-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider), originalRun = worker.run.bind(worker);
+    let starts = 0;
+    worker.run = async turn => {
+      starts++; const prepared = await turn.prepare(); prepared.release();
+      if (starts > 1) expect(prepared.text).toContain("Do not repeat completed effects");
+      // No onSendActivated/onSubmitted: the final task is still unsent.
+      throw chatGptMultipartAcknowledgementTimeoutError(1);
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, e => events.push(e));
+      expect(starts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 1);
+      expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_multipart_acknowledgement_timeout", retryable: false });
+      expect(events.some(e => e.type === "done" || e.type === "tool_call_start")).toBeFalse();
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); }
   });
 
   test("productive Web recoveries reset the empty budget and preserve an emitted text prefix", async () => {
