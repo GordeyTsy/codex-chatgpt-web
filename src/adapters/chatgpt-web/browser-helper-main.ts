@@ -8,7 +8,7 @@ import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
 import { isChatGptWebMultipartPartCount, type CompiledChatGptWebPrompt } from "./prompt";
-import { ChatGptMirroredTurnProgress } from "./turn-progress";
+import { ChatGptMirroredTurnProgress, assertChatGptTurnProgressSnapshot } from "./turn-progress";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
 
 interface RunMessage {
@@ -37,6 +37,7 @@ interface RunMessage {
     compaction?: boolean;
     captureLunaCheckpoint?: boolean;
     externalProgress?: boolean;
+    initialProgress?: ChatGptExternalTurnProgressSnapshot;
   };
 }
 
@@ -187,6 +188,10 @@ async function run(message: RunMessage): Promise<void> {
   if (message.turn.externalProgress !== undefined && typeof message.turn.externalProgress !== "boolean") {
     throw new Error("Browser helper external progress flag is invalid");
   }
+  if (message.turn.initialProgress !== undefined) {
+    if (message.turn.externalProgress !== true) throw new Error("Browser helper initial progress requires its progress transport");
+    assertChatGptTurnProgressSnapshot(message.turn.initialProgress);
+  }
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
@@ -215,6 +220,9 @@ async function run(message: RunMessage): Promise<void> {
     })
     : undefined;
   if (progress) turnProgress.set(message.id, progress);
+  // Seed history before the worker starts. A later progress frame must not turn an old completed
+  // batch into a fresh pre-tool boundary merely because IPC delivered it after run initialization.
+  if (progress && message.turn.initialProgress) progress.apply(message.turn.initialProgress);
   const promptSelection = createBrowserHelperPromptSelection();
   preparedSelections.set(message.id, promptSelection);
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });

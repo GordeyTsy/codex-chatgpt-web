@@ -8,13 +8,14 @@ import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launche
 import { DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS } from "../src/adapters/chatgpt-web/model-progress-watchdog";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-test("daemon streams browser lifecycle through the real helper process", async () => {
+test.each([0, 73])("daemon streams browser lifecycle through the real helper process (historical results=%s)", async historicalResults => {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-client-"));
   roots.push(root);
   const helper = join(root, "helper.ts");
@@ -22,6 +23,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
     import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
     // Substitute only the browser. Both sides of the production IPC protocol run unchanged.
     ChatGptBrowserWorker.prototype.run = async function(turn) {
+      const initial = turn.externalProgress.snapshot();
+      if (initial.revision !== ${historicalResults ? historicalResults + 1 : 0}
+        || initial.lastToolBatchRevision !== ${historicalResults ? 1 : 0}
+        || initial.activeToolCalls !== 0) throw new Error("Historical progress was not seeded before worker initialization");
       if (this.config.modelProgressTimeoutMs !== 123_456) throw new Error("Model silence budget lost in helper IPC");
       if (this.config.useSavedChats !== true) throw new Error("Saved chat preference lost in helper IPC");
       if (turn.modelFamily !== "5.6") throw new Error("Pinned model family lost in helper IPC");
@@ -92,6 +97,12 @@ test("daemon streams browser lifecycle through the real helper process", async (
   let sendActivated = false;
   let submitted = false;
   let released = false;
+  const progress = new ChatGptExternalTurnProgress();
+  if (historicalResults) {
+    const batch = progress.recordToolBatch(historicalResults);
+    await progress.acknowledgeToolBatch(batch);
+    for (let index = 0; index < historicalResults; index++) progress.recordToolResult();
+  }
   const client = new LauncherBrowserHelperClient(config);
   try {
     const result = await client.run({
@@ -100,6 +111,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
       reasoning: "high",
       modelFamily: "5.6",
       capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
+      externalProgress: progress,
+      completionFence: { begin: async () => 1, commit: async () => true },
       prepare: async () => ({
         text: "inspect", images: [],
         skillFiles: [selectedSkillFile({ role: "user", origin: "codex_skill", timestamp: 0,

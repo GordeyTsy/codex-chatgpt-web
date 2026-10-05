@@ -296,7 +296,10 @@ export class LauncherBrowserHelperClient {
             ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
             ...(turn.compaction ? { compaction: true } : {}),
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
-            ...(turn.externalProgress ? { externalProgress: true } : {}),
+            ...(turn.externalProgress ? {
+              externalProgress: true,
+              initialProgress: turn.externalProgress.snapshot(),
+            } : {}),
           },
         })
           // Only mirror once the run frame is on the wire, so the helper never sees progress for a
