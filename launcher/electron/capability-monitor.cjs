@@ -24,7 +24,9 @@ class CapabilityMonitor {
       if (!config || config.browserInteractionMode === "manual") { delay = this.intervalMs; return; }
       if (this.host.activeTraceId || this.host.currentOperation()) return;
       const health = await this.supervisor.proxyHealthPayload(config);
-      if (!health || health.active_http_turns !== 0 || health.active_browser_turns !== 0) return;
+      // Native provider streams do not use the browser. Blocking discovery on
+      // their HTTP lifetime can postpone a picker check indefinitely.
+      if (!health || health.active_browser_turns !== 0) return;
       // inspectSession takes the launcher's manual-operation lease and refuses a racing turn.
       const observed = await this.host.inspectSession(true);
       if (this.stopped) return;

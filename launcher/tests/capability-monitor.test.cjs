@@ -20,6 +20,15 @@ test('active turn defers inspection and preserves catalog', async () => {
   const f = fixture(); f.host.activeTraceId='active'; await f.monitor.check();
   assert.deepEqual(f.calls,[]); assert.equal(f.timers.at(-1),60000);
 });
+test('unrelated native HTTP generation does not starve idle browser discovery', async () => {
+  const f = fixture(); f.supervisor.proxyHealthPayload = async () => ({ active_http_turns: 2, active_browser_turns: 0 });
+  await f.monitor.check(); assert.deepEqual(f.calls, ['inspect',{proSelectable:true}]);
+  assert.equal(f.timers.at(-1),3600000);
+});
+test('browser activity reported by the bridge defers a racing inspection', async () => {
+  const f = fixture(); f.supervisor.proxyHealthPayload = async () => ({ active_http_turns: 1, active_browser_turns: 1 });
+  await f.monitor.check(); assert.deepEqual(f.calls, []); assert.equal(f.timers.at(-1),60000);
+});
 test('negative picker observation never removes a model', async () => {
   const f = fixture(); f.host.inspectSession=async()=>({proSelectable:false}); await f.monitor.check();
   assert.deepEqual(f.calls,[]); assert.equal(f.timers.at(-1),3600000);
