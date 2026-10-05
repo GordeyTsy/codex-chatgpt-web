@@ -896,8 +896,9 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/admin/pro-available") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-        // Only positive idle picker evidence re-enables a model; probes never remove it.
-        if (activity().active_http_turns || activity().active_browser_turns) return new Response("Busy", { status: 409 });
+        // The launcher probes under an idle browser lease. Publishing immutable catalog
+        // metadata is safe while unrelated native HTTP requests are in flight; running
+        // Web turns keep their captured capabilities and model selection.
         const body = await req.json().catch(() => null);
         if (!body || Object.keys(body).length !== 1 || body.proSelectable !== true) return new Response("Invalid evidence", { status: 400 });
         try { updateProAvailability(true); }
