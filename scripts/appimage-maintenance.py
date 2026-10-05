@@ -11,7 +11,7 @@ import urllib.request
 
 
 def request(base, token, action=None):
-    url = base + ("/health" if action is None else "/admin/" + action)
+    url = base + ("/healthz" if action is None else "/admin/" + action)
     req = urllib.request.Request(url, method="GET" if action is None else "POST",
                                  headers={"Authorization": "Bearer " + token})
     try:

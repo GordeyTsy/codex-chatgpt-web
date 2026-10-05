@@ -35,9 +35,15 @@ class MaintenanceTests(unittest.TestCase):
                 pass
 
             def do_GET(self):
-                self.reply()
+                if self.path == "/healthz":
+                    self.reply()
+                else:
+                    self.send_error(404)
 
             def do_POST(self):
+                if self.path not in ("/admin/drain", "/admin/resume"):
+                    self.send_error(404)
+                    return
                 fixture.calls.append(self.path)
                 fixture.state["accepting_turns"] = self.path == "/admin/resume"
                 if self.path == "/admin/drain" and fixture.drop_drain_response:
