@@ -60,6 +60,7 @@ export async function selectChatGptModelFamily(
       const current = familyOption(selected, family);
       if (await current.count() > 1) throw familyError(family);
       if (await current.count() === 1 && await current.getAttribute("aria-checked") === "true") return selected;
+      if (await selected.sliderContainer?.isVisible().catch(() => false)) return selected;
       await new Promise(resolve => setTimeout(resolve, 50));
     } while (Date.now() < deadline);
     throw familyError(family);
