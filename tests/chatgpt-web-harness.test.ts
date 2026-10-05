@@ -475,7 +475,7 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
-  test.each(["inactivity", "logout", "delivery", "binding"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
+  test.each(["inactivity", "logout", "delivery", "binding", "missing-dom"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
     const socketPath = brokerTestEndpoint(`cgw-result-recovery-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://result-recovery-${Date.now()}`,
       chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, modelProgressTimeoutMs: 60,
@@ -505,7 +505,8 @@ describe("ChatGPT outer-native harness v4", () => {
       if (scenario !== "inactivity") throw new ChatGptWebAdapterError("isolated browser failure", {
         status: scenario === "logout" ? 401 : 502,
         errorType: scenario === "logout" ? "authentication_error" : "server_error",
-        code: scenario === "logout" ? "chatgpt_sign_in_required" : "chatgpt_message_delivery_timeout", retryable: false,
+        code: scenario === "logout" ? "chatgpt_sign_in_required"
+          : scenario === "missing-dom" ? "chatgpt_assistant_dom_unavailable" : "chatgpt_message_delivery_timeout", retryable: false,
       });
       return new Promise<string>((_, reject) => {
         turn.abortSignal!.addEventListener("abort", () => reject(turn.abortSignal!.reason), { once: true });
@@ -1470,6 +1471,25 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     }
+  });
+
+  test("missing assistant recovery never resends a task without accepted submission evidence", async () => {
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://dom-unaccepted-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider), originalRun = worker.run.bind(worker);
+    let starts = 0;
+    worker.run = async turn => {
+      starts++; turn.onSendActivated?.();
+      throw new ChatGptWebAdapterError("assistant identity unavailable", {
+        status: 502, errorType: "server_error", code: "chatgpt_assistant_dom_unavailable", retryable: false,
+      });
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml),
+        { headers: new Headers() }, event => events.push(event));
+      expect(starts).toBe(1); expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_assistant_dom_unavailable" });
+    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); }
   });
 
   test("an unclassified browser failure retires its session before the next native retry", async () => {

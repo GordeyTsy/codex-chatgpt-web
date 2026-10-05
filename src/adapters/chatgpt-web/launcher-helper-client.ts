@@ -279,6 +279,7 @@ export class LauncherBrowserHelperClient {
             browserHostDescriptorPath: this.config.browserHostDescriptorPath!,
             browserDiagnosticsPath: this.config.browserDiagnosticsPath,
             turnTimeoutMs: this.config.turnTimeoutMs,
+            modelProgressTimeoutMs: this.config.modelProgressTimeoutMs,
             autoApproveToolCalls: this.config.autoApproveToolCalls,
             useSavedChats: this.config.useSavedChats,
           },

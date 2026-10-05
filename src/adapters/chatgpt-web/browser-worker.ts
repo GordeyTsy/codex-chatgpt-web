@@ -2,6 +2,7 @@ import { waitForLauncherAuthentication } from "../../launcher-browser-host";
 import { installAutolinkRenderCompatibility } from "./autolink-render-compat";
 import { ChatGptMessageDeliveryRecovery } from "./message-delivery-recovery";
 import { captureChatGptTimeoutPage } from "./timeout-page-snapshot";
+import { DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS } from "./model-progress-watchdog";
 import { assertChatGptBindingCompletion, ChatGptBindingAnswerBuffer } from "./binding-failure";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -93,6 +94,7 @@ import {
   ChatGptCompactionHandoffAccepted,
   ChatGptWebAdapterError,
   chatGptBrowserTabClosedError,
+  chatGptAssistantDomUnavailableError,
   chatGptRetainedConversationUnavailableError,
   chatGptStoppedThinkingError,
 } from "./adapter-error";
@@ -1421,6 +1423,7 @@ export interface ResolvedBrowserConfig {
   storageStatePath: string;
   chromeExecutablePath: string;
   turnTimeoutMs?: number;
+  modelProgressTimeoutMs: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
   useSavedChats: boolean;
@@ -2140,11 +2143,12 @@ class ChatGptBrowserDiagnostics {
     }
   }
 
-  async captureModelTimeout(page: Page): Promise<void> {
-    await this.capture(page, "model-progress-timeout");
+  async captureModelTimeout(page: Page, reason: "chatgpt_model_no_progress" | "chatgpt_assistant_dom_unavailable" = "chatgpt_model_no_progress"): Promise<void> {
+    const checkpoint = reason === "chatgpt_model_no_progress" ? "model-progress-timeout" : "assistant-dom-unavailable";
+    await this.capture(page, checkpoint);
     try {
-      const stem = join(this.directory, `${String(++this.sequence).padStart(2, "0")}-model-progress-timeout-private`);
-      await captureChatGptTimeoutPage(page, stem);
+      const stem = join(this.directory, `${String(++this.sequence).padStart(2, "0")}-${checkpoint}-private`);
+      await captureChatGptTimeoutPage(page, stem, reason);
       console.info(`[chatgpt-web] private timeout page trace=${this.traceId} path=${stem}`);
     } catch {
       console.warn(`[chatgpt-web] private timeout page capture failed trace=${this.traceId}`);
@@ -2162,6 +2166,10 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     configured.browserDiagnosticsPath?.trim() || join(getConfigDir(), "diagnostics", "browser-turns"),
   ));
   const turnTimeoutMs = configured.turnTimeoutMs;
+  const modelProgressTimeoutMs = configured.modelProgressTimeoutMs ?? DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS;
+  if (!Number.isFinite(modelProgressTimeoutMs) || modelProgressTimeoutMs <= 0) {
+    throw new Error("ChatGPT modelProgressTimeoutMs must be a positive finite number");
+  }
   if (browserHost === "launcher" && !browserHostDescriptorPath) {
     throw new Error("Launcher browser host requires chatgptWeb.browserHostDescriptorPath");
   }
@@ -2190,6 +2198,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
+    modelProgressTimeoutMs,
     headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
     useSavedChats: configured.useSavedChats === true,
@@ -3222,7 +3231,7 @@ export class ChatGptBrowserWorker {
       if (progress?.lastProgressAt !== undefined) {
         responseDeadline = Math.min(
           deadline ?? Number.POSITIVE_INFINITY,
-          Math.max(responseDeadline, progress.lastProgressAt + graceMs),
+          Math.max(responseDeadline, progress.lastProgressAt + this.config.modelProgressTimeoutMs),
         );
       }
       if (deadline !== undefined && Date.now() >= deadline) {
@@ -3242,9 +3251,9 @@ export class ChatGptBrowserWorker {
         if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
           recoveryAttempts += 1;
           if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
-            throw new Error(
+            throw chatGptAssistantDomUnavailableError(
               `ChatGPT accepted the message, but its DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
-              { cause: error },
+              error,
             );
           }
           const recovered = await recoverObservation(
@@ -3300,8 +3309,8 @@ export class ChatGptBrowserWorker {
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
       if (Date.now() >= responseDeadline
-        && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
-        throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
+        && !chatGptExternalToolCallsAreInFlight(progress)) {
+        throw chatGptAssistantDomUnavailableError("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
       }
       await this.waitForTurnDomOrExternalProgress(
         observationPage,
@@ -5827,6 +5836,8 @@ export class ChatGptBrowserWorker {
         const reason = originalAbortSignal?.reason;
         if (reason instanceof ChatGptWebAdapterError && reason.code === "chatgpt_model_no_progress") {
           await diagnostics.captureModelTimeout(diagnosticPage);
+        } else if (error instanceof ChatGptWebAdapterError && error.code === "chatgpt_assistant_dom_unavailable") {
+          await diagnostics.captureModelTimeout(diagnosticPage, "chatgpt_assistant_dom_unavailable");
         } else {
           await diagnostics.capture(diagnosticPage, "turn-failed", error);
         }

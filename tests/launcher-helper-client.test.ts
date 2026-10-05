@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
+import { DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS } from "../src/adapters/chatgpt-web/model-progress-watchdog";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
 
@@ -21,6 +22,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
     // Substitute only the browser. Both sides of the production IPC protocol run unchanged.
     ChatGptBrowserWorker.prototype.run = async function(turn) {
+      if (this.config.modelProgressTimeoutMs !== 123_456) throw new Error("Model silence budget lost in helper IPC");
       if (this.config.useSavedChats !== true) throw new Error("Saved chat preference lost in helper IPC");
       if (turn.modelFamily !== "5.6") throw new Error("Pinned model family lost in helper IPC");
       await turn.onPreparedSelected(false);
@@ -71,6 +73,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     createdAt: new Date().toISOString(),
   })}\n`, { mode: 0o600 });
   const config: ResolvedBrowserConfig = {
+    modelProgressTimeoutMs: 123_456,
     appName: "Codex Native2",
     browserHost: "launcher",
     browserHostDescriptorPath: descriptorPath,
@@ -186,6 +189,7 @@ test("accepted compaction retires through the helper as completed without hiding
     surfaceTargets: { launcher_surface_id_0123456789AB: "native-owned-target" },
   }), { mode: 0o600 });
   const client = new LauncherBrowserHelperClient({
+    modelProgressTimeoutMs: DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS,
     appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
     browserHelperScriptPath: helper, browserDiagnosticsPath: join(root, "diagnostics"),
     storageStatePath: join(root, "unused-state.json"), chromeExecutablePath: join(root, "unused-chrome"),
@@ -234,6 +238,7 @@ test("accepted compaction retires through the helper as completed without hiding
 test("launcher helper protocol preserves multipart context and the compaction flag", async () => {
   const sent: Record<string, unknown>[] = [];
   const client = new LauncherBrowserHelperClient({
+    modelProgressTimeoutMs: DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS,
     appName: "Codex Native2 DEV",
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
@@ -311,6 +316,7 @@ test.each([false, true])("an abort cannot overtake the run frame and carries wat
   const messages: string[] = [];
   let released = false;
   const client = new LauncherBrowserHelperClient({
+    modelProgressTimeoutMs: DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS,
     appName: "Codex Native",
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
@@ -361,6 +367,7 @@ test.each([false, true])("an abort cannot overtake the run frame and carries wat
 
 test("structured helper errors preserve the ChatGPT adapter failure contract", async () => {
   const client = new LauncherBrowserHelperClient({
+    modelProgressTimeoutMs: DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS,
     appName: "Codex Native",
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
@@ -419,6 +426,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
 
 test("an older helper cannot silently drop selected skill files and releases the prepared turn", async () => {
   const client = new LauncherBrowserHelperClient({
+    modelProgressTimeoutMs: DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS,
     appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused.json", chromeExecutablePath: "/durable/chrome", headed: true, autoApproveToolCalls: false, useSavedChats: false,
   });

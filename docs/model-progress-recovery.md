@@ -10,6 +10,19 @@ While any tool call is unresolved the deadline is suspended. The final returned
 tool result starts a fresh budget, including for parallel long-running tools.
 Manual Zero Risk interactions are not subject to this automatic recovery.
 
+While the current assistant DOM node is missing, authenticated MCP activity uses
+the same configured silence budget rather than the shorter renderer grace period.
+An unresolved native tool call suspends this missing-node timer; its returned
+result starts a fresh silence window. The timeout value also crosses the browser
+helper IPC boundary. An explicit caller deadline still takes precedence.
+
+Missing assistant identity or exhausted same-page observation rebinds produce
+`chatgpt_assistant_dom_unavailable`. The bridge recovers this failure only after
+the task submission was confirmed. Multipart staging and ambiguous sends do not
+authorize replay. A fresh conversation retains the same native turn, capability
+and completed results. This diagnostic also saves private page artifacts with
+the `assistant-dom-unavailable` checkpoint and its own capture reason.
+
 The bridge captures the inactive page, aborts and physically releases its surface,
 then opens a fresh Web conversation inside the same native Codex turn. It keeps
 the current MCP capability, native history and completed tool results. The recovery

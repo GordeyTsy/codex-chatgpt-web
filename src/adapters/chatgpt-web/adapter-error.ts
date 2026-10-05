@@ -30,6 +30,14 @@ export function chatGptToolTimeoutError(tool: string, timeoutMs: number): ChatGp
   );
 }
 
+export function chatGptAssistantDomUnavailableError(message: string, cause?: unknown): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(message, {
+    // Only the bridge's confirmed-submission supervisor may recover this fault.
+    status: 502, errorType: "server_error", code: "chatgpt_assistant_dom_unavailable", retryable: false,
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
 // Only the compaction owner may signal this after the broker accepts its one-shot handoff.
 // It cancels browser observation, while the accepted summary remains the native result.
 export class ChatGptCompactionHandoffAccepted extends DOMException {

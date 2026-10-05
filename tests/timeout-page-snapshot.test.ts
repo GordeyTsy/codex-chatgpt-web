@@ -24,13 +24,13 @@ test("timeout evidence saves private page artifacts without exporting their cont
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("closed or broken page records partial capture and permits cleanup", async () => {
+test.each(["chatgpt_model_no_progress", "chatgpt_assistant_dom_unavailable"] as const)("closed or broken page records %s capture and permits cleanup", async reason => {
   const directory = mkdtempSync(join(tmpdir(), "cgw-timeout-partial-"));
   try {
     const stem = join(directory, "trace-timeout");
     const page = { screenshot: async () => { throw new Error("closed"); },
       evaluate: async () => { throw new Error("unresponsive"); } } as unknown as Page;
-    await captureChatGptTimeoutPage(page, stem);
-    expect(JSON.parse(readFileSync(`${stem}.capture.json`, "utf8"))).toMatchObject({ saved: [], failed: ["screenshot", "page"] });
+    await captureChatGptTimeoutPage(page, stem, reason);
+    expect(JSON.parse(readFileSync(`${stem}.capture.json`, "utf8"))).toMatchObject({ reason, saved: [], failed: ["screenshot", "page"] });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

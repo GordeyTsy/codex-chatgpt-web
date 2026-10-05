@@ -1123,6 +1123,49 @@ test("a failed stale-browser disconnect prevents the replacement connection", as
   expect(replacementAttempts).toBe(0);
 });
 
+test("missing assistant waits for real tool results and the full model silence budget", async () => {
+  const realDateNow = Date.now;
+  try {
+    for (const scenario of ["reasoning-gap", "long-command", "silence", "deadline"] as const) {
+      let now = 1_000, waits = 0;
+      Date.now = () => now;
+      const progress = new ChatGptExternalTurnProgress();
+      progress.recordToolBatch(1, now);
+      if (scenario !== "long-command") progress.recordToolResult(now);
+      const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
+      const assistant = { id: "current-assistant" };
+      const page = { isClosed: () => false,
+        locator: (selector: string) => selector.startsWith("[data-turn-id=") ? assistant : hidden } as unknown as Page;
+      const worker = ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web",
+        baseUrl: `browser://missing-dom-progress-${scenario}-${Math.random()}`,
+        chatgptWeb: { localToolsEnabled: true, modelProgressTimeoutMs: 300_000 } }) as unknown as {
+          waitForNewAssistantTurn(page: Page, baseline: unknown, deadline: number | undefined,
+            signal: undefined, progress: ChatGptExternalTurnProgress): Promise<unknown>;
+          submissionDomState(): Promise<unknown>;
+          waitForTurnDomOrExternalProgress(): Promise<void>;
+        };
+      worker.submissionDomState = async () => ({ turnIdentities: ["user", "assistant"], userIdentities: ["user"],
+        responseIdentities: (scenario === "reasoning-gap" && waits >= 2)
+          || (scenario === "long-command" && waits >= 3) ? ["assistant"] : [], visibleStopButtonCount: 0 });
+      worker.waitForTurnDomOrExternalProgress = async () => {
+        if (++waits > 3) throw new Error("missing assistant ignored silence expiry");
+        if (scenario === "long-command") {
+          if (waits === 1) now += 20 * 60_000;
+          else if (waits === 2) progress.recordToolResult(now);
+          else now += 90_000;
+        } else now += scenario === "silence" ? 300_001 : 90_000;
+      };
+      const result = worker.waitForNewAssistantTurn(page, { initialTurnIdentities: [], domCache: {} },
+        scenario === "deadline" ? now + 80_000 : undefined, undefined, progress);
+      if (scenario === "reasoning-gap" || scenario === "long-command") {
+        await expect(result).resolves.toMatchObject({ identity: "assistant", locator: assistant });
+      } else if (scenario === "silence") {
+        await expect(result).rejects.toMatchObject({ code: "chatgpt_assistant_dom_unavailable", retryable: false });
+      } else await expect(result).rejects.toThrow("ChatGPT web turn timed out");
+    }
+  } finally { Date.now = realDateNow; }
+});
+
 test("closing the launcher page is an immediate terminal turn error", async () => {
   const responseDomSnapshot = (ChatGptBrowserWorker.prototype as unknown as {
     responseDomSnapshot(responseTurn: unknown): Promise<unknown>;

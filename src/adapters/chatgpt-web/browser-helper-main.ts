@@ -19,6 +19,7 @@ interface RunMessage {
     browserHostDescriptorPath: string;
     browserDiagnosticsPath?: string;
     turnTimeoutMs: number;
+    modelProgressTimeoutMs?: number;
     autoApproveToolCalls: boolean;
     useSavedChats?: boolean;
   };
@@ -195,6 +196,7 @@ async function run(message: RunMessage): Promise<void> {
       browserHostDescriptorPath: message.config.browserHostDescriptorPath,
       browserDiagnosticsPath: message.config.browserDiagnosticsPath,
       turnTimeoutMs: message.config.turnTimeoutMs,
+      modelProgressTimeoutMs: message.config.modelProgressTimeoutMs,
       autoApproveToolCalls: message.config.autoApproveToolCalls,
       useSavedChats: message.config.useSavedChats === true,
     },

@@ -2,7 +2,9 @@ import type { Page } from "playwright-core";
 import { atomicWriteFile } from "../../config";
 
 /** Private local evidence only. Capture failures must never prevent turn cleanup. */
-export async function captureChatGptTimeoutPage(page: Page, stem: string): Promise<void> {
+export async function captureChatGptTimeoutPage(page: Page, stem: string,
+  reason: "chatgpt_model_no_progress" | "chatgpt_assistant_dom_unavailable" = "chatgpt_model_no_progress",
+): Promise<void> {
   const bounded = async <T>(operation: Promise<T>): Promise<T> => {
     let timer: ReturnType<typeof setTimeout>;
     try {
@@ -43,5 +45,5 @@ export async function captureChatGptTimeoutPage(page: Page, stem: string): Promi
     } catch { failed.push(kind); }
   }
   atomicWriteFile(`${stem}.capture.json`, JSON.stringify({ version: 1,
-    capturedAt: new Date().toISOString(), reason: "chatgpt_model_no_progress", saved, failed }));
+    capturedAt: new Date().toISOString(), reason, saved, failed }));
 }
