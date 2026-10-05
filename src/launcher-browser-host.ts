@@ -295,6 +295,36 @@ export async function connectLauncherBrowserHost(
   }
 }
 
+/** Wait for verified owner login without touching the browser or sending a prompt. */
+export async function waitForLauncherAuthentication(
+  descriptorPath: string, signal?: AbortSignal, pollMs = 2_000,
+): Promise<void> {
+  let required = true;
+  while (true) {
+    signal?.throwIfAborted();
+    const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+    const response = await fetch(`${descriptor.control.endpoint}/v1/session/authentication`, {
+      method: "POST", headers: { authorization: `Bearer ${descriptor.control.token}`, "content-type": "application/json" },
+      body: JSON.stringify(required ? { required: true } : {}),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`Launcher authentication wait failed: HTTP ${response.status}`);
+    const body = await response.json() as Record<string, unknown>;
+    if (typeof body.authenticated !== "boolean" || typeof body.authenticationRequired !== "boolean"
+      || (body.authenticated && body.authenticationRequired)) {
+      throw new Error("Launcher returned invalid authentication wait evidence");
+    }
+    if (!required && body.authenticated && !body.authenticationRequired) return;
+    required = false;
+    await new Promise<void>((resolveWait, rejectWait) => {
+      const onAbort = () => { clearTimeout(timer); rejectWait(signal?.reason); };
+      const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolveWait(); }, pollMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  }
+}
+
 export async function inspectLauncherBrowserHost(
   descriptorPath: string,
   options: {

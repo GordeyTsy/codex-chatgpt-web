@@ -416,7 +416,7 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: () => void } = {},
+    hooks: { onCompactionProgress?: () => void; onAuthenticationWait?: (waiting: boolean) => void } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -522,17 +522,33 @@ export function createChatGptWebAdapter(
           }, Math.min(1_000, modelProgress.timeoutMs));
           try { return prefix + await turn.browser; }
           catch (error) {
-            if (!(error instanceof ChatGptWebAdapterError && error.code === "chatgpt_model_no_progress")
-              || browserAbort.signal.aborted) throw error;
+            clearInterval(interval);
+            const authentication = error instanceof ChatGptWebAdapterError
+              && ["chatgpt_session_expired", "chatgpt_sign_in_required"].includes(error.code);
+            const recoverable = error instanceof ChatGptWebAdapterError
+              && ["chatgpt_model_no_progress", "chatgpt_message_delivery_timeout"].includes(error.code);
+            if ((!authentication && !recoverable) || browserAbort.signal.aborted) throw error;
             // Capture and release the old surface before taking a new lease. The MCP capability
             // and native turn remain the same; completed results stay in the latest native input.
             await turn.physicalSettlement;
             await releaseRetainedConversation?.();
             capturedCheckpoint = undefined;
             checkpointCaptureError = undefined;
-            const productive = modelProgress.outputCount > 0 || progress?.snapshot().lastProgressAt !== previousToolProgress;
-            emptyRecoveries = productive ? 0 : emptyRecoveries + 1;
-            if (emptyRecoveries > MAX_CHATGPT_WEB_TURN_RETRIES) throw error;
+            if (authentication) {
+              console.warn(`[chatgpt-web] authentication_wait trace=${traceId}`);
+              trace.push({ kind: "commentary", text: "ChatGPT requires sign-in. The task is preserved and waiting for owner login." });
+              // The physical helper has settled. Keep the logical native turn and
+              // completed tool results alive; no watchdog, retry budget or Send runs
+              // until the launcher has verified the owner's login.
+              hooks.onAuthenticationWait?.(true);
+              try { await worker.waitForAuthentication(browserAbort.signal); }
+              finally { hooks.onAuthenticationWait?.(false); }
+              console.info(`[chatgpt-web] authentication_restored trace=${traceId}`);
+            } else {
+              const productive = modelProgress.outputCount > 0 || progress?.snapshot().lastProgressAt !== previousToolProgress;
+              emptyRecoveries = productive ? 0 : emptyRecoveries + 1;
+              if (emptyRecoveries > MAX_CHATGPT_WEB_TURN_RETRIES) throw error;
+            }
             console.info(`[chatgpt-web] model_progress_recovery trace=${traceId} nextAttempt=${attempt + 1} emptyRecoveries=${emptyRecoveries}`);
             trace.push({ kind: "commentary", text: "Recovering an inactive ChatGPT conversation from saved progress." });
           } finally { clearInterval(interval); }
@@ -1048,7 +1064,11 @@ export function createChatGptWebAdapter(
                       manualRequest ? environment : undefined,
                       freshCompactionTraceId,
                       turnCapabilities,
-                      { onCompactionProgress: armHandoffDeadline },
+                      { onCompactionProgress: armHandoffDeadline,
+                        onAuthenticationWait: waiting => {
+                          if (waiting) { if (handoffTimer) clearTimeout(handoffTimer); }
+                          else armHandoffDeadline();
+                        } },
                     );
                     retainOwnershipUntil(fallbackRuntime.physicalSettlement);
                     try {
@@ -1190,6 +1210,14 @@ export function createChatGptWebAdapter(
                         [handoffError, retirementError instanceof Error ? retirementError : new Error(String(retirementError))],
                         "Structured compaction failed and its retained conversation could not be retired",
                       );
+                    }
+                    if (handoffError instanceof ChatGptWebAdapterError
+                      && ["chatgpt_session_expired", "chatgpt_sign_in_required"].includes(handoffError.code)) {
+                      if (handoffTimer) clearTimeout(handoffTimer);
+                      console.warn(`[chatgpt-web] compaction_authentication_wait trace=${compactionTraceId}`);
+                      await worker.waitForAuthentication(operatorSignal);
+                      operationSignal.throwIfAborted();
+                      return await runFreshCompaction("authentication_restored");
                     }
                     if (handoffError instanceof ChatGptWebAdapterError
                       && handoffError.code === "compaction_source_unavailable") {

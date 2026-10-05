@@ -101,6 +101,7 @@ class BrowserControlServer {
       || request.url === "/v1/turn/approval"
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
+    const isAuthenticationStatus = request.url === "/v1/session/authentication";
     const isSessionInspect = request.url === "/v1/session/inspect";
     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
     const manualAction = new Map([
@@ -111,7 +112,7 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isAuthenticationStatus && !isProxyResolution && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -136,6 +137,18 @@ class BrowserControlServer {
       const preferences = this.getPreferences();
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
+      if (isAuthenticationStatus) {
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || Object.keys(body).some(key => key !== "required")
+          || (body.required !== undefined && body.required !== true)) {
+          throw new Error("Invalid authentication wait request");
+        }
+        if (host.browserInteractionMode() === "manual") {
+          throw new Error("Automatic authentication waiting is unavailable in Zero Risk mode");
+        }
+        writeJson(response, 200, host.authenticationStatus(body.required === true));
+        return;
+      }
       if (isSessionInspect) {
         if (host.browserInteractionMode() === "manual") {
           const error = new Error(

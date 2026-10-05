@@ -910,6 +910,20 @@ class BrowserHost {
     });
   }
 
+  authenticationStatus(required = false) {
+    if (required && !this.reauthenticationRequired) {
+      this.reauthenticationRequired = true;
+      this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
+      this.setState({ authenticated: false, status: "signed-out",
+        message: "Sign in to ChatGPT to resume the preserved task" });
+      this.logger.warn("browser.authentication_wait", {});
+    }
+    // Only the verified user-login probe clears reauthenticationRequired. This
+    // read never navigates, spawns helpers, clicks Login, or returns session data.
+    return { authenticated: this.state.authenticated === true && !this.reauthenticationRequired,
+      authenticationRequired: this.reauthenticationRequired === true };
+  }
+
   markTurnAuthenticationRequired(tab) {
     tab.authenticationRequired = true;
     tab.loading = false;

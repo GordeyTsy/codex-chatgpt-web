@@ -20,6 +20,7 @@ import {
   startLauncherManualTurn,
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
+  waitForLauncherAuthentication,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
@@ -683,5 +684,39 @@ test("manual Sent wait preserves typed timeout and cancellation signals", async 
     } finally {
       await new Promise<void>(resolveClose => server.close(() => resolveClose()));
     }
+  }
+});
+
+
+test("authentication wait keeps one human gate, is abortable, and validates private HTTP evidence", async () => {
+  let ready = false;
+  const bodies: unknown[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    bodies.push(await request.json());
+    return Response.json({ authenticated: ready, authenticationRequired: !ready });
+  } });
+  try {
+    const file = descriptorFile(`http://127.0.0.1:${server.port}`);
+    const controller = new AbortController();
+    const cancelled = waitForLauncherAuthentication(file, controller.signal, 5);
+    for (let i = 0; i < 50 && bodies.length < 2; i++) await Bun.sleep(2);
+    expect(bodies[0]).toEqual({ required: true }); expect(bodies[1]).toEqual({});
+    controller.abort(new Error("owner cancelled"));
+    await expect(cancelled).rejects.toThrow("owner cancelled");
+    ready = false; bodies.length = 0;
+    const restored = waitForLauncherAuthentication(file, undefined, 5);
+    for (let i = 0; i < 50 && bodies.length < 2; i++) await Bun.sleep(2);
+    ready = true; await restored;
+    expect(bodies.filter(body => (body as { required?: boolean }).required)).toHaveLength(1);
+  } finally { server.stop(true); }
+});
+
+test("malformed, contradictory and unavailable authentication evidence cannot resume a task", async () => {
+  for (const body of [{ authenticated: "true", authenticationRequired: false },
+    { authenticated: true, authenticationRequired: true }, { authenticated: true }]) {
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json(body) });
+    try { await expect(waitForLauncherAuthentication(descriptorFile(`http://127.0.0.1:${server.port}`), undefined, 1))
+      .rejects.toThrow("invalid authentication wait evidence"); }
+    finally { server.stop(true); }
   }
 });

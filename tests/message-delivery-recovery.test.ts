@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { ChatGptMessageDeliveryRecovery } from "../src/adapters/chatgpt-web/message-delivery-recovery";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, throwIfChatGptSessionFailureAlert } from "../src/adapters/chatgpt-web/browser-worker";
 
 const executablePath = process.env.CHATGPT_DOM_TEST_BROWSER;
 const domTest = (name: string, run: () => Promise<void>, timeout = 15_000) =>
@@ -170,3 +170,25 @@ domTest("an unconfirmed Retry is not activated again on the same recovery object
     expect(await page.evaluate(() => (window as any).deliveryRetryCount)).toBe(1);
   });
 }, 30_000);
+
+
+domTest("an anonymous composer with rendered login controls is an authentication gate", async () => {
+  await withPage(async page => {
+    await page.setContent('<header><button>Log in</button><button>Sign up for free</button></header><main><div id="prompt-textarea" contenteditable="true"></div></main>');
+    await expect(throwIfChatGptSessionFailureAlert(page)).rejects.toMatchObject({
+      code: "chatgpt_sign_in_required", status: 401, retryable: false,
+    });
+  });
+});
+
+domTest("quoted, hidden and partial login controls never classify an authenticated page as logged out", async () => {
+  for (const content of [
+    '<div data-message-author-role="assistant"><button>Log in</button><button>Sign up for free</button></div>',
+    '<header hidden><button>Log in</button><button>Sign up</button></header>',
+    '<header><button>Log in</button></header>',
+    '<pre><button>Log in</button><button>Sign up</button></pre>',
+  ]) await withPage(async page => {
+    await page.setContent(content + '<div id="prompt-textarea" contenteditable="true"></div>');
+    await expect(throwIfChatGptSessionFailureAlert(page)).resolves.toBeUndefined();
+  });
+});

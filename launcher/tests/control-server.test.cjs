@@ -737,3 +737,35 @@ test("browser control server rejects malformed retained-conversation contracts",
     await server.close();
   }
 });
+
+test("authentication gate is private, read-only while waiting, and clears only after verified login", async () => {
+  let probes = 0;
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { authenticated: true }, reauthenticationRequired: false, authenticationRevision: 7,
+    getBrowserInteractionMode: () => "automatic", logger: { warn() {} },
+    setState(value) { this.state = { ...this.state, ...value }; },
+    inspectSession() { probes++; throw new Error("Waiting must not navigate or spawn an inspection helper"); },
+  });
+  const server = await new BrowserControlServer({ logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => host, getPreferences: () => ({}) }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = (body, authorization = `Bearer ${token}`) => fetch(`${endpoint}/v1/session/authentication`, {
+    method: "POST", headers: { authorization, "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    assert.equal((await send({ required: true }, "Bearer invalid")).status, 401);
+    assert.equal(host.state.authenticated, true);
+    for (const invalid of [null, [], { required: false }, { required: true, command: "unexpected" }]) {
+      assert.equal((await send(invalid)).status, 400);
+    }
+    assert.deepEqual(await (await send({ required: true })).json(), { authenticated: false, authenticationRequired: true });
+    assert.equal(host.authenticationRevision, 8);
+    for (let i = 0; i < 3; i++) {
+      assert.deepEqual(await (await send({})).json(), { authenticated: false, authenticationRequired: true });
+    }
+    assert.equal(host.authenticationRevision, 8); assert.equal(probes, 0);
+    // Isolated verified-probe completion, not a live account login claim.
+    host.state.authenticated = true; host.reauthenticationRequired = false;
+    assert.deepEqual(await (await send({})).json(), { authenticated: true, authenticationRequired: false });
+  } finally { await server.close(); }
+});

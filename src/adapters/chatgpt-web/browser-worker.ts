@@ -1,3 +1,4 @@
+import { waitForLauncherAuthentication } from "../../launcher-browser-host";
 import { installAutolinkRenderCompatibility } from "./autolink-render-compat";
 import { ChatGptMessageDeliveryRecovery } from "./message-delivery-recovery";
 import { captureChatGptTimeoutPage } from "./timeout-page-snapshot";
@@ -821,6 +822,25 @@ export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<voi
       { status: 401, errorType: "authentication_error", code: "chatgpt_session_expired", retryable: false },
     );
   }
+  // Logged-out ChatGPT still exposes a composer. Only rendered authentication
+  // controls outside messages identify this state; quoted Login text is irrelevant.
+  const signedOut = await Promise.resolve().then(() => page.locator('button, a').evaluateAll(elements => {
+    const controls = elements.filter(element => {
+      if (element.closest('[data-message-author-role], [data-markdown-text-style], [data-turn-key], pre, code')) return false;
+      for (let parent: Element | null = element; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (parent.matches('[hidden], [inert], [aria-hidden="true"]')
+          || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+      }
+      return true;
+    });
+    return controls.some(element => element.textContent?.trim() === "Log in")
+      && controls.some(element => /^(Sign up|Sign up for free)$/.test(element.textContent?.trim() ?? ""));
+  })).catch(() => false);
+  if (signedOut) throw new ChatGptWebAdapterError(
+    "ChatGPT is signed out. Sign in in the launcher to resume the preserved task.",
+    { status: 401, errorType: "authentication_error", code: "chatgpt_sign_in_required", retryable: false },
+  );
   if (!await chatGptSubscriptionFailureAlert(page).isVisible().catch(() => false)) return;
   throw new ChatGptWebAdapterError(
     "ChatGPT could not load the account subscription. Reload ChatGPT inside the launcher and retry; sign out only if the error persists.",
@@ -2453,6 +2473,14 @@ export class ChatGptBrowserWorker {
       if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
     }).catch(() => {});
     return run;
+  }
+
+  async waitForAuthentication(signal?: AbortSignal): Promise<void> {
+    if (this.config.browserHost !== "launcher" || !this.config.browserHostDescriptorPath) {
+      throw new ChatGptWebAdapterError("Sign in again before resuming this saved browser session.",
+        { status: 401, errorType: "authentication_error", code: "chatgpt_sign_in_required", retryable: false });
+    }
+    await waitForLauncherAuthentication(this.config.browserHostDescriptorPath, signal);
   }
 
   verifyConnector(traceId = `verify_${randomUUID().replaceAll("-", "")}`): Promise<string> {

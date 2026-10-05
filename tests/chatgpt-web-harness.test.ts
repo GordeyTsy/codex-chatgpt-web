@@ -325,6 +325,43 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
+  test("logout waits for verified login without a second Send or watchdog restart", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-auth-wait-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://auth-wait-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, modelProgressTimeoutMs: 40,
+        experimentalFreshConversationPerTurn: true, solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker), originalWait = worker.waitForAuthentication.bind(worker);
+    let runs = 0, waiting = false, loggedIn!: () => void;
+    const login = new Promise<void>(resolve => { loggedIn = resolve; });
+    const prompts: string[] = [];
+    worker.run = async turn => {
+      runs++;
+      const prepared = await turn.prepare(); prompts.push(prepared.text); prepared.release();
+      turn.onSubmitted?.();
+      if (runs === 1) {
+        turn.onTextDelta("Preserved ");
+        throw new ChatGptWebAdapterError("Expired session", { status: 401, errorType: "authentication_error",
+          code: "chatgpt_session_expired", retryable: false });
+      }
+      turn.onTextDelta("progress"); return "progress";
+    };
+    worker.waitForAuthentication = async () => { waiting = true; await login; };
+    try {
+      const events: AdapterEvent[] = [];
+      const run = createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, e => events.push(e));
+      for (let i = 0; i < 100 && !waiting; i++) await Bun.sleep(2);
+      expect(waiting).toBeTrue();
+      await Bun.sleep(120); // Three watchdog windows; this is a human gate.
+      expect(runs).toBe(1); expect(events.some(e => e.type === "error" || e.type === "done")).toBeFalse();
+      loggedIn(); await run;
+      expect(runs).toBe(2); expect(prompts[1]).toContain("Preserved ");
+      expect(prompts[1]).toContain("Do not repeat completed effects");
+      expect(events.some(e => e.type === "error")).toBeFalse(); expect(events.at(-1)?.type).toBe("done");
+    } finally { loggedIn(); worker.run = originalRun; worker.waitForAuthentication = originalWait;
+      chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+  });
+
   test("a running tool protects the browser beyond the timeout until its result returns", async () => {
     const socketPath = brokerTestEndpoint(`cgw-long-progress-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
@@ -354,13 +391,14 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
-  test("same-turn recovery preserves a completed broker call and latest native result without reinvocation", async () => {
+  test.each(["inactivity", "logout", "delivery"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
     const socketPath = brokerTestEndpoint(`cgw-result-recovery-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://result-recovery-${Date.now()}`,
       chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, modelProgressTimeoutMs: 60,
         solAvailable: true, extraHighAvailable: true, proAvailable: true } };
     const worker = ChatGptBrowserWorker.forProvider(provider);
-    const originalRun = worker.run.bind(worker);
+    const originalRun = worker.run.bind(worker), originalWait = worker.waitForAuthentication.bind(worker);
+    worker.waitForAuthentication = async () => { await Bun.sleep(100); };
     const tokens: string[] = [];
     let invocations = 0;
     worker.run = async turn => {
@@ -379,6 +417,11 @@ describe("ChatGPT outer-native harness v4", () => {
         method: "invoke", bindingId: claim.bindingId, wireName: "exec_command", freeform: false,
         arguments: { cmd: "confirmed-effect", workdir: tempRoot },
       }));
+      if (scenario !== "inactivity") throw new ChatGptWebAdapterError("isolated browser failure", {
+        status: scenario === "logout" ? 401 : 502,
+        errorType: scenario === "logout" ? "authentication_error" : "server_error",
+        code: scenario === "logout" ? "chatgpt_sign_in_required" : "chatgpt_message_delivery_timeout", retryable: false,
+      });
       return new Promise<string>((_, reject) => {
         turn.abortSignal!.addEventListener("abort", () => reject(turn.abortSignal!.reason), { once: true });
       });
@@ -408,7 +451,7 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(final.at(-1)?.type).toBe("done");
       expect(final.some(event => event.type === "error" || event.type === "tool_call_start")).toBeFalse();
       expect(invocations).toBe(1); expect(tokens).toHaveLength(2);
-    } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+    } finally { worker.run = originalRun; worker.waitForAuthentication = originalWait; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
   test("consecutive empty Web recoveries remain bounded", async () => {
