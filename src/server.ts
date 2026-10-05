@@ -18,7 +18,7 @@ import {
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import { providerConfig, loadConfig, saveConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -829,6 +829,18 @@ export function startServer(
       );
     });
   }
+  const updateProAvailability = (available: boolean): void => {
+    // Read/merge only these capability fields; preserve routes, credentials and owner settings.
+    const current = loadConfig();
+    saveConfig({ ...current, ...(available ? { proAvailable: true } : {}), proSelectable: available });
+    if (available) config.proAvailable = true;
+    config.proSelectable = available;
+  };
+  const adapterFactory = dependencies.adapterFactory ?? ((provider: Parameters<ChatGptWebAdapterFactory>[0]) =>
+    createChatGptWebAdapter(provider, { onProUnavailable: () => {
+      try { updateProAvailability(false); }
+      catch { console.warn("[chatgpt-web] could not persist unavailable Pro catalog state"); }
+    } }));
   let draining = false;
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
@@ -879,6 +891,16 @@ export function startServer(
           last_model_catalog_result: lastModelCatalogResult,
           ...activity(),
         });
+      }
+      if (req.method === "POST" && url.pathname === "/admin/pro-available") {
+        if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        // Only positive idle picker evidence re-enables a model; probes never remove it.
+        if (activity().active_http_turns || activity().active_browser_turns) return new Response("Busy", { status: 409 });
+        const body = await req.json().catch(() => null);
+        if (!body || Object.keys(body).length !== 1 || body.proSelectable !== true) return new Response("Invalid evidence", { status: 400 });
+        try { updateProAvailability(true); }
+        catch { return new Response("Capability persistence failed", { status: 500 }); }
+        return Response.json({ proAvailable: true, proSelectable: true });
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -1082,7 +1104,7 @@ export function startServer(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),
             config,
-            dependencies.adapterFactory,
+            adapterFactory,
             { onTurnIdentity: bindIdentity },
           ),
           req.signal,
@@ -1096,7 +1118,7 @@ export function startServer(
           (signal, bindIdentity) => compactRequest(
             new Request(req, { signal }),
             config,
-            dependencies.adapterFactory,
+            adapterFactory,
             { onTurnIdentity: bindIdentity },
           ),
           req.signal,

@@ -297,7 +297,7 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
   const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
   const page = {
     url: () => "https://chatgpt.com/?temporary-chat=true",
-    evaluate: async () => true,
+    evaluate: async () => ({ userId: "fixture-user", accountId: "fixture-account", planType: "plus", structure: "personal", needsAttention: false }),
     locator: (selector: string) => {
       if (selector === CHATGPT_COMPOSER_SELECTOR) return composer;
       if (selector === CHATGPT_EFFORT_MENU_SELECTOR) return menu;
@@ -320,7 +320,7 @@ test("a late model control within the inspection budget is not recorded as Luna-
   await expect(detectChatGptAccountCapabilities(fixture.page as never, {
     selectorTimeoutMs: 1_000,
     stableAbsenceMs: 0,
-  })).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  })).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true, proSelectable: true });
 });
 
 test("an effort-control observation failure cannot become a Luna-only detection", async () => {
@@ -334,7 +334,7 @@ test("an effort-control observation failure cannot become a Luna-only detection"
 
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {
   const fixture = reasoningPicker({ delay });
-  await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true, proSelectable: true });
 });
 
 test("an absent effort slider cannot turn three model rows into a saved non-Pro capability", async () => {
@@ -343,19 +343,19 @@ test("an absent effort slider cannot turn three model rows into a saved non-Pro 
 });
 
 test("the authoritative three-step range is non-Pro; a malformed range fails closed", async () => {
-  await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "2" }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false });
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "2" }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false, proSelectable: false });
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "bad" }).page as never)).rejects.toThrow("invalid ARIA range");
 });
 
 test("the four-step browser range keeps Extra High available when Pro is unavailable", async () => {
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "3" }).page as never))
-    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false, proSelectable: false });
 });
 
 test("capabilities read range and ticks together instead of combining different renders", async () => {
   const fixture = reasoningPicker({ max: "3", staleAttributeMax: "4" });
   await expect(detectChatGptAccountCapabilities(fixture.page as never))
-    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false, proSelectable: false });
 });
 
 test("effort confirmation tolerates disappearing Pro only while the requested effort remains selected and unlocked", async () => {
@@ -382,10 +382,10 @@ test("effort confirmation rejects a newly locked selection even when the range a
 test("capabilities exclude the observed locked Plus upsell and reject unknown lock state", async () => {
   await expect(detectChatGptAccountCapabilities(reasoningPicker({
     max: "3", locks: ["false", "false", "false", "true"],
-  }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false });
+  }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false, proSelectable: false });
   await expect(detectChatGptAccountCapabilities(reasoningPicker({
     locks: ["false", "false", "false", "false", "true"],
-  }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
+  }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false, proSelectable: false });
   for (const locks of [[], ["false", "false", "false", null], ["false", "false", "false", "unknown"]]) {
     await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "3", locks }).page as never))
       .rejects.toThrow("availability");
@@ -394,9 +394,9 @@ test("capabilities exclude the observed locked Plus upsell and reject unknown lo
 
 test("power picker omission of lock attributes requires its enabled structural owner and complete ticks", async () => {
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: Array(5).fill(null) }).page as never))
-    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true, proSelectable: true });
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: [null, null, null, "true", "true"] }).page as never))
-    .resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false });
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false, proSelectable: false });
   for (const options of [
     { power: false }, { power: true, disabled: "true" }, { power: true, disabled: "unknown" },
     { power: true, max: "3" },

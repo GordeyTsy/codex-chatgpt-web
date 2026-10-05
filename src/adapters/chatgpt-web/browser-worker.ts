@@ -230,12 +230,18 @@ function chatGptModelControlUnavailableAdapterError(diagnostic: string, detail?:
   );
 }
 
+export function isExplicitProQuotaDetail(detail?: string): boolean {
+  return !!detail && /(?:reached|hit|exceeded|used up).{0,70}(?:limit|allowance)|(?:limit|usage|quota).{0,60}(?:reset|reached|exhausted)|more.{0,30}(?:available|messages).{0,40}(?:\bon\b|\bat\b)/i.test(detail)
+    && !/upgrade|subscribe|payment|not supported|region|safety|policy/i.test(detail);
+}
+
 export function chatGptRequestedModeUnavailableError(label: string, detail?: string): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     `ChatGPT currently does not offer the requested ${label} mode in its model picker. `
     + `The selected model was not changed. Choose an available WEB model or retry when ${label} becomes available.`
     + (detail ? ` ChatGPT: ${detail}` : ""),
-    { status: 409, errorType: "model_unavailable", code: "chatgpt_model_unavailable", retryable: false },
+    { status: 409, errorType: "model_unavailable", code: label === "Pro" && isExplicitProQuotaDetail(detail)
+      ? "chatgpt_pro_quota_exhausted" : "chatgpt_model_unavailable", retryable: false },
   );
 }
 
@@ -1165,7 +1171,7 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
-  const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
+  const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable && !capabilities.proQuotaExhausted
     ? ["low", "medium", "max"]
     : ["low", "medium"];
   for (const effort of efforts) {
@@ -2767,6 +2773,8 @@ export class ChatGptBrowserWorker {
         throw chatGptRequestedModeUnavailableError(mode.displayLabel, detail);
       }
       if (!state.available[uiEffortIndex]) {
+        const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(menu) : undefined;
+        if (isExplicitProQuotaDetail(detail)) throw chatGptRequestedModeUnavailableError("Pro", detail);
         throw new ChatGptWebAdapterError(
           `ChatGPT locks the browser option requested for ${mode.displayLabel} behind an upgrade. `
           + "The message was not sent. Choose an available effort and run Repair Codex setup to refresh the model list.",

@@ -475,11 +475,11 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally { worker.run = originalRun; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
   });
 
-  test.each(["inactivity", "logout", "delivery", "binding", "missing-dom", "missing-dom-then-multipart"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
+  test.each(["inactivity", "logout", "delivery", "binding", "missing-dom", "missing-dom-then-multipart", "pro-quota"])("same-turn %s recovery preserves a completed broker call and latest native result without reinvocation", async scenario => {
     const socketPath = brokerTestEndpoint(`cgw-result-recovery-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://result-recovery-${Date.now()}`,
       chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, modelProgressTimeoutMs: 60,
-        solAvailable: true, extraHighAvailable: true, proAvailable: true } };
+        solAvailable: true, extraHighAvailable: true, proAvailable: true, proQuotaFallbackThreadIds: ["thread_test_123"] } };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker), originalWait = worker.waitForAuthentication.bind(worker);
     worker.waitForAuthentication = async () => { await Bun.sleep(100); };
@@ -497,6 +497,7 @@ describe("ChatGPT outer-native harness v4", () => {
       }
       turn.onSubmitted?.();
       if (tokens.length >= 2) {
+        if (scenario === "pro-quota") { expect(turn.modelFamily).toBe("5.6"); expect(turn.reasoning).toBe("xhigh"); }
         expect(prepared.text).toContain("CONFIRMED_EFFECT_RECEIPT");
         expect(prepared.text).toContain("Do not repeat completed effects");
         expect(token).toBe(tokens[0]);
@@ -508,6 +509,7 @@ describe("ChatGPT outer-native harness v4", () => {
         method: "invoke", bindingId: claim.bindingId, wireName: "exec_command", freeform: false,
         arguments: { cmd: "confirmed-effect", workdir: tempRoot },
       }));
+      if (scenario === "pro-quota") throw new ChatGptWebAdapterError("Pro quota exhausted", { status: 409, errorType: "model_unavailable", code: "chatgpt_pro_quota_exhausted", retryable: false });
       if (scenario === "binding") assertChatGptBindingCompletion("I could not continue: turn token is invalid, expired, or revoked.");
       if (scenario !== "inactivity") throw new ChatGptWebAdapterError("isolated browser failure", {
         status: scenario === "logout" ? 401 : 502,
@@ -522,6 +524,7 @@ describe("ChatGPT outer-native harness v4", () => {
     try {
       const adapter = createChatGptWebAdapter(provider);
       const first = rawWireRequest(environmentXml);
+      if (scenario === "pro-quota") { first._chatgptModelFamily = "6"; first.options.reasoning = "max"; }
       const events: AdapterEvent[] = [];
       await adapter.runTurn!(first, { headers: new Headers() }, event => events.push(event));
       const call = events.find(event => event.type === "tool_call_start") as Extract<AdapterEvent, { type: "tool_call_start" }>;
@@ -4433,4 +4436,58 @@ describe("adapter liveness covers every path through a turn", () => {
     // Verify continued liveness, not millisecond-exact OS timer scheduling.
     expect(heartbeats.at(-1)).toBeGreaterThan(heartbeats[0]!);
   }, 40_000);
+});
+
+
+describe("owner-scoped Pro quota fallback", () => {
+  for (const code of ["chatgpt_pro_quota_exhausted", "chatgpt_effort_locked", "rate_limit_exceeded", "chatgpt_model_unavailable"]) {
+    test(`only confirmed Pro quota falls back: ${code}`, async () => {
+      const socketPath = brokerTestEndpoint(`quota-${process.pid}-${Date.now()}`);
+      const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://quota-${code}-${Date.now()}`,
+        chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true,
+          extraHighAvailable: true, proAvailable: true, proQuotaFallbackThreadIds: ["thread_test_123"] } };
+      const worker = ChatGptBrowserWorker.forProvider(provider), original = worker.run.bind(worker);
+      let runs = 0, firstToken: string | undefined;
+      worker.run = async turn => {
+        runs++;
+        const prepared = await turn.prepare(); prepared.release();
+        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)![1]!;
+        expect(token).toBeDefined();
+        if (runs === 1) {
+          firstToken = token;
+          expect(turn.modelFamily).toBe("6"); expect(turn.reasoning).toBe("max");
+          throw new ChatGptWebAdapterError("Picker test", { status: 409, errorType: "model_unavailable", code, retryable: false });
+        }
+        expect(turn.modelFamily).toBe("5.6"); expect(turn.reasoning).toBe("xhigh");
+        expect(turn.capabilities.proAvailable).toBeTrue();
+        expect(turn.capabilities.proQuotaExhausted).toBeTrue();
+        expect(token).toBe(firstToken!);
+        turn.onSubmitted?.(); turn.onTextDelta("Finished on approved fallback");
+        return "Finished on approved fallback";
+      };
+      try {
+        const request = proRequest(); request._chatgptModelFamily = "6";
+        const events: AdapterEvent[] = [];
+        await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, e => events.push(e));
+        const allowed = code === "chatgpt_pro_quota_exhausted";
+        expect(runs).toBe(allowed ? 2 : 1);
+        expect(events.some(e => e.type === "error")).toBe(!allowed);
+        expect(events.some(e => e.type === "done")).toBe(allowed);
+      } finally { worker.run = original; chatGptTurnSessions.clear(); await TurnBroker.forSocket(socketPath).close(); }
+    });
+  }
+  test("another thread cannot inherit the coordinator quota policy", async () => {
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://quota-denied-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true,
+        proAvailable: true, proQuotaFallbackThreadIds: ["other-thread"] } };
+    const worker = ChatGptBrowserWorker.forProvider(provider), original = worker.run.bind(worker); let runs = 0;
+    worker.run = async () => { runs++; throw new ChatGptWebAdapterError("Quota", {
+      status: 409, errorType: "model_unavailable", code: "chatgpt_pro_quota_exhausted", retryable: false }); };
+    try {
+      const request = proRequest(); request._chatgptModelFamily = "6";
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, e => events.push(e));
+      expect(runs).toBe(1); expect(events.some(e => e.type === "error")).toBeTrue();
+    } finally { worker.run = original; chatGptTurnSessions.clear(); }
+  });
 });

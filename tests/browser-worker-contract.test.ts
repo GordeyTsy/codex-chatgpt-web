@@ -4533,3 +4533,11 @@ test("a stage that spans a system sleep is not charged for the slept time", asyn
   expect(error.retryable).toBe(false);
   expect(chatGptRequestedModeUnavailableError("Pro", "Available tomorrow").message).toContain("Available tomorrow");
  });
+
+test("Pro quota classification requires a concrete picker explanation", () => {
+  expect(chatGptRequestedModeUnavailableError("Pro", "You've reached the usage limit. Your limit resets tomorrow.").code)
+    .toBe("chatgpt_pro_quota_exhausted");
+  for (const detail of [undefined, "Upgrade to Pro", "Too many requests", "Safety policy", "Network unavailable"])
+    expect(chatGptRequestedModeUnavailableError("Pro", detail).code).toBe("chatgpt_model_unavailable");
+  expect(chatGptRequestedModeUnavailableError("High", "Usage limit reached").code).toBe("chatgpt_model_unavailable");
+});

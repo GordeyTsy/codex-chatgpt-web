@@ -372,3 +372,11 @@ describe("native /models augmentation", () => {
     }, defaultConfig("full"))).toThrow("no list-visible, tool-capable model");
   });
 });
+
+test("a failed Pro pick hides its row without losing existing-thread model metadata", () => {
+  const config = { ...defaultConfig("full"), proAvailable: true, proSelectable: false };
+  const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
+  expect(models.find(m => m.slug === "chatgpt-web/gpt-6-pro")?.visibility).toBe("hide");
+  const refreshed = augmentNativeModelCatalog(source(), { ...config, proSelectable: true }).models as Array<Record<string, unknown>>;
+  expect(refreshed.find(m => m.slug === "chatgpt-web/gpt-6-pro")?.visibility).toBe("list");
+});

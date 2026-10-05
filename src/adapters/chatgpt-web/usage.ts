@@ -97,7 +97,7 @@ export function resolveBiggerContextMultipartParts(
     const messages = compiledChatGptWebMessages(compiled);
     // Inert stages may use any explicitly available staging effort; execution keeps the chosen
     // effort. These are the widest stage modes used by the browser's existing selector.
-    const stagingEffort = capabilities.proAvailable ? "max" : "medium";
+    const stagingEffort = capabilities.proAvailable && !capabilities.proQuotaExhausted ? "max" : "medium";
     for (const [index, text] of messages.entries()) {
       const final = index === messages.length - 1;
       const effort = final ? mode.effort : stagingEffort;

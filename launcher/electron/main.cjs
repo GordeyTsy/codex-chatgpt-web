@@ -1,3 +1,4 @@
+const { CapabilityMonitor } = require("./capability-monitor.cjs");
 const { configureWindowsTrust } = require("./windows-trust.cjs");
 configureWindowsTrust();
 const languages = require("./languages.json");
@@ -1221,6 +1222,11 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();
+  if (!IS_DEV_PROFILE) {
+    const capabilityMonitor = new CapabilityMonitor({ host: browserHost, supervisor: runtimeSupervisor, logger });
+    capabilityMonitor.start();
+    app.once("before-quit", () => capabilityMonitor.stop());
+  }
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),

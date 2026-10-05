@@ -277,6 +277,8 @@ export interface ChatGptWebAccountCapabilities {
   /** Missing in older saved observations; setup must probe before exposing Extra High. */
   extraHighAvailable?: boolean;
   proAvailable: boolean;
+  /** Catalog visibility from verified picker selection; routing entitlement is separate. */
+  proSelectable?: boolean;
   experimentalBiggerContext?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;

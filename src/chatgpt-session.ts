@@ -1,3 +1,4 @@
+import { readChatGptUsageAccount, supportsChatGptUsageTracking } from "./adapters/chatgpt-web/account";
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
@@ -326,7 +327,15 @@ export async function detectChatGptAccountCapabilities(
     await sliderContainer.waitFor({ state: "visible", timeout });
     await slider.waitFor({ state: "attached", timeout });
     const { available } = await readChatGptEffortSnapshot(sliderContainer);
-    return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable: available[4] === true };
+    // Picker availability is instantaneous quota state, not subscription entitlement.
+    // Keep entitled Pro models discoverable while their temporary quota is empty.
+    let entitledPro = false;
+    if (!available[4] && new URL(page.url()).origin === "https://chatgpt.com") {
+      const account = await readChatGptUsageAccount(page);
+      entitledPro = supportsChatGptUsageTracking(account) && !account.needsAttention;
+    }
+    return { solAvailable: true, extraHighAvailable: available[3] === true,
+      proAvailable: available[4] === true || entitledPro, proSelectable: available[4] === true };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }

@@ -306,6 +306,8 @@ export interface CodexProviderConfig {
     /** Account capability proven by the authenticated browser probe. */
     extraHighAvailable?: boolean;
     proAvailable?: boolean;
+    /** Owner-approved native threads: Pro quota only -> Sol Extra High. */
+    proQuotaFallbackThreadIds?: string[];
     /** Web-only canonical history window; does not enlarge the browser message envelope. */
     fixedWebContextWindow?: number;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */

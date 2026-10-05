@@ -644,7 +644,7 @@ export function compileChatGptWebPrompt(
       const transactionId = `ctx_${"0".repeat(32)}`;
       const budgets = multipart.parts.map((payload, index) => {
         const final = index === multipart.parts.length - 1;
-        const effort = final ? mode.effort : capabilities.proAvailable ? "max" : "medium";
+        const effort = final ? mode.effort : capabilities.proAvailable && !capabilities.proQuotaExhausted ? "max" : "medium";
         const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities);
         const tokenLimit = resolveChatGptWebMessageTokenBudget(
           CHATGPT_WEB_MODEL_ID, effort, capabilities, final ? imageTokens + skillFileTokens(skillFiles, parsed.modelId) : 0,

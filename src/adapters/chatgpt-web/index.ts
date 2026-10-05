@@ -344,6 +344,7 @@ export function createChatGptWebAdapter(
   provider: CodexProviderConfig,
   dependencies: {
     broker?: TurnBrokerOwner;
+    onProUnavailable?: () => void;
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
   } = {},
 ): ProviderAdapter {
@@ -453,6 +454,7 @@ export function createChatGptWebAdapter(
       }
       : undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
+      input = effectiveInput(input);
       if (manualRequest) return {};
       const experimentalMultipartParts = experimentalBiggerContext
         ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments)
@@ -488,8 +490,15 @@ export function createChatGptWebAdapter(
     const browserAbort = new AbortController();
     let modelProgress = new ChatGptModelProgressWatchdog(progressTimeoutMs);
     let recoveryInput = checkpointInput.parsed;
+    let quotaFallback = false;
+    const fallbackAllowed = parsed._chatgptModelFamily === "6" && parsed.options.reasoning === "max"
+      && !!identity.threadId && turnCapabilities.extraHighAvailable
+      && provider.chatgptWeb?.proQuotaFallbackThreadIds?.includes(identity.threadId) === true;
+    const effectiveInput = (input: CodexParsedRequest): CodexParsedRequest => quotaFallback
+      ? { ...input, _chatgptModelFamily: "5.6", options: { ...input.options, reasoning: "xhigh" } }
+      : input;
     let prepareRecovery: (() => Promise<CompiledChatGptWebPrompt & { release: () => void }>) | undefined;
-    const savedRecoveryInput = (): CodexParsedRequest => ({ ...recoveryInput,
+    const savedRecoveryInput = (): CodexParsedRequest => ({ ...effectiveInput(recoveryInput),
       context: { ...recoveryInput.context, messages: [ ...recoveryInput.context.messages,
         ...(text.value() ? [{ role: "assistant" as const, content: [{ type: "text" as const, text: text.value() }], timestamp: Date.now() }] : []),
         { role: "user" as const, timestamp: Date.now(), content:
@@ -508,6 +517,8 @@ export function createChatGptWebAdapter(
           const prefix = text.value();
           const previousToolProgress = progress?.snapshot().lastProgressAt;
           const physical = worker.run({ ...template,
+            capabilities: turnCapabilities,
+            ...(quotaFallback ? { reasoning: "xhigh", modelFamily: "5.6" as const } : {}),
             abortSignal: AbortSignal.any([browserAbort.signal, attemptAbort.signal]),
             ...(attempt > 0 ? { requireRetainedConversation: false,
               prepareResume: undefined, prepare: prepareRecovery! } : {}),
@@ -529,14 +540,26 @@ export function createChatGptWebAdapter(
               && (["chatgpt_model_no_progress", "chatgpt_message_delivery_timeout", "chatgpt_turn_token_mismatch",
                 "chatgpt_multipart_acknowledgement_timeout"].includes(error.code)
                 || (error.code === "chatgpt_assistant_dom_unavailable" && submission.phase === "accepted"));
-            if ((!authentication && !recoverable) || browserAbort.signal.aborted) throw error;
+            if (template.reasoning === "max" && !quotaFallback && error instanceof ChatGptWebAdapterError
+              && ["chatgpt_pro_quota_exhausted", "chatgpt_model_unavailable", "chatgpt_effort_locked"].includes(error.code)) {
+              dependencies.onProUnavailable?.();
+            }
+            const quota = !turnCapabilities.proQuotaExhausted && error instanceof ChatGptWebAdapterError
+              && error.code === "chatgpt_pro_quota_exhausted"
+              && ((fallbackAllowed && !quotaFallback) || parsed.options.reasoning !== "max");
+            if ((!authentication && !recoverable && !quota) || browserAbort.signal.aborted) throw error;
             // Capture and release the old surface before taking a new lease. The MCP capability
             // and native turn remain the same; completed results stay in the latest native input.
             await turn.physicalSettlement;
             await releaseRetainedConversation?.();
             capturedCheckpoint = undefined;
             checkpointCaptureError = undefined;
-            if (authentication) {
+            if (quota) {
+              quotaFallback = fallbackAllowed;
+              turnCapabilities = { ...turnCapabilities, proQuotaExhausted: true };
+              console.info(`[chatgpt-web] pro_quota_recovery trace=${traceId} modelChanged=${quotaFallback}`);
+              if (quotaFallback) trace.push({ kind: "commentary", text: "The Pro quota is exhausted. Continuing with the owner-configured GPT-5.6 Sol (Web), Extra High, preserving completed work." });
+            } else if (authentication) {
               console.warn(`[chatgpt-web] authentication_wait trace=${traceId}`);
               trace.push({ kind: "commentary", text: "ChatGPT requires sign-in. The task is preserved and waiting for owner login." });
               // The physical helper has settled. Keep the logical native turn and
@@ -562,7 +585,7 @@ export function createChatGptWebAdapter(
             }
             browserAbort.signal.throwIfAborted();
             console.info(`[chatgpt-web] model_progress_recovery trace=${traceId} nextAttempt=${attempt + 1} emptyRecoveries=${emptyRecoveries}`);
-            trace.push({ kind: "commentary", text: "Recovering an inactive ChatGPT conversation from saved progress." });
+            if (!quota) trace.push({ kind: "commentary", text: "Recovering an inactive ChatGPT conversation from saved progress." });
           } finally { clearInterval(interval); }
         }
       };

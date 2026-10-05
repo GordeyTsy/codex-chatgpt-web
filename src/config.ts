@@ -119,6 +119,8 @@ export interface AppConfig {
   solAvailable: boolean;
   extraHighAvailable?: boolean;
   proAvailable: boolean;
+  proSelectable?: boolean;
+  proQuotaFallbackThreadIds?: string[];
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
@@ -560,6 +562,16 @@ function parseConfig(value: unknown, path: string): AppConfig {
       || !isAbsolute(expandUserPath(parsed.externalRoutesPath)))) {
     throw new Error(`Invalid externalRoutesPath in ${path}`);
   }
+  if (parsed.proQuotaFallbackThreadIds !== undefined && (!Array.isArray(parsed.proQuotaFallbackThreadIds)
+    || parsed.proQuotaFallbackThreadIds.length > 16
+    || parsed.proQuotaFallbackThreadIds.some(id => typeof id !== "string"
+      || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
+    || new Set(parsed.proQuotaFallbackThreadIds).size !== parsed.proQuotaFallbackThreadIds.length)) {
+    throw new Error(`Invalid proQuotaFallbackThreadIds in ${path}`);
+  }
+  if (parsed.proSelectable !== undefined && typeof parsed.proSelectable !== "boolean") {
+    throw new Error(`Invalid proSelectable in ${path}`);
+  }
   const solAvailable = parsed.solAvailable !== false;
   const proAvailable = parsed.proAvailable === true;
   if (parsed.experimentalSkillAttachments !== undefined && typeof parsed.experimentalSkillAttachments !== "boolean") {
@@ -656,6 +668,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       solAvailable: manual ? false : config.solAvailable,
       extraHighAvailable: !manual && config.extraHighAvailable === true,
       proAvailable: manual ? false : config.proAvailable,
+      proQuotaFallbackThreadIds: manual ? [] : config.proQuotaFallbackThreadIds,
       fixedWebContextWindow: config.fixedWebContextWindow,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,

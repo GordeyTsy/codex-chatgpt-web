@@ -332,7 +332,7 @@ export async function inspectLauncherBrowserHost(
     expectedProfile?: LauncherBrowserHostProfile;
     timeoutMs?: number;
   } = {},
-): Promise<{ solAvailable?: boolean; extraHighAvailable?: boolean; proAvailable?: boolean; url: string }> {
+): Promise<{ solAvailable?: boolean; extraHighAvailable?: boolean; proAvailable?: boolean; proSelectable?: boolean; url: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   if (options.expectedProfile && descriptor.profile !== options.expectedProfile) {
     throw new Error(
@@ -376,6 +376,7 @@ export async function inspectLauncherBrowserHost(
         solAvailable: body.solAvailable as boolean,
         extraHighAvailable: body.extraHighAvailable as boolean,
         proAvailable: body.proAvailable as boolean,
+        ...(typeof body.proSelectable === "boolean" ? { proSelectable: body.proSelectable } : {}),
       } : {}),
     };
   } catch (error) {

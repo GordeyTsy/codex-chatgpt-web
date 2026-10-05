@@ -11,6 +11,8 @@ export interface ChatGptWebCapabilities {
   solAvailable: boolean;
   extraHighAvailable: boolean;
   proAvailable: boolean;
+  /** Entitlement is retained, but multipart staging must avoid exhausted Pro. */
+  proQuotaExhausted?: boolean;
   fixedWebContextWindow?: number;
 }
 

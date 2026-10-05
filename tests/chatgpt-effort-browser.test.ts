@@ -75,7 +75,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
         render();
       </script>`);
     if (scenario === "hydrate") {
-      expect(await detectChatGptAccountCapabilities(page)).toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
+      expect(await detectChatGptAccountCapabilities(page)).toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false, proSelectable: false });
     } else {
       const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
       const effort = scenario === "pro-disappears" ? "max" : scenario === "locked" ? "high" : "xhigh";
@@ -89,3 +89,22 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
     await page.close();
   } finally { await browser.close(); }
 }, 120_000);
+
+for (const [plan, delinquent, entitled] of [["pro", false, true], ["plus", false, false], ["pro", true, false]] as const)
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`Pro catalog entitlement survives empty picker quota only on eligible ${plan}/${delinquent}`, async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.route("https://chatgpt.com/**", route => route.fulfill(route.request().url().endsWith("/api/auth/session")
+      ? { contentType: "application/json", body: JSON.stringify({ user: { id: "test-user" }, account: {
+        id: "test-account", planType: plan, structure: "personal", isDelinquent: delinquent } }) }
+      : { contentType: "text/html", body: `<form><div id="prompt-textarea" contenteditable="true">Draft</div>
+        <button type="button" data-tone="neutral" aria-haspopup="menu" aria-expanded="true">Extra High</button></form>
+        <div role="menu"><div data-model-picker-power-slider style="height:30px;width:250px"><div data-orientation="horizontal" aria-disabled="false">
+        ${Array(4).fill('<i data-selected="true"></i>').join('')}
+        <span role="slider" aria-valuemin="0" aria-valuemax="3" aria-valuenow="3"></span></div></div></div>` }));
+    await page.goto("https://chatgpt.com/?temporary-chat=true");
+    expect(await detectChatGptAccountCapabilities(page)).toEqual({ solAvailable: true,
+      extraHighAvailable: true, proAvailable: entitled, proSelectable: false });
+  } finally { await browser.close(); }
+});
