@@ -1383,9 +1383,10 @@ async function start() {
       }
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready") return runtime;
-    const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    // Startup must preserve the owner's current Codex route. Setup explicitly
+    // connects it; restarting or updating the launcher must not reconnect a
+    // route the owner removed to recover their native Codex access.
+    return runtime;
   })().then(async (runtime) => {
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();
@@ -1399,10 +1400,6 @@ async function start() {
         useSavedChats: config.useSavedChats === true,
         autoApproveToolCalls: config.autoApproveToolCalls === true,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
-        ...(runtime.bridgeRouteChanged ? {
-          codexCatalogVerified: false,
-          codexRestartRequired: true,
-        } : {}),
         ...(config.mode === "browser-only" ? {
           mcpSetupComplete: false,
           mcpGuideStep: 0,

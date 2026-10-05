@@ -2296,6 +2296,67 @@ test("concurrent launcher session refresh requests share one browser operation",
   assert.equal(fixture.sessionRefreshOperation, null);
 });
 
+test("a stalled saved-session load releases navigation ownership and allows retry", async () => {
+  let finishLoad;
+  let stops = 0;
+  let probes = 0;
+  const states = [];
+  const contents = {
+    getURL: () => IDLE_BROWSER_URL,
+    isDestroyed: () => false,
+    setBackgroundThrottling() {},
+    stop: () => { stops += 1; },
+    loadURL: () => new Promise(resolve => { finishLoad = resolve; }),
+  };
+  const fixture = {
+    ready: async () => {}, activeTraceId: null, manualOperation: null,
+    activateHomeSurface() {}, view: { webContents: contents },
+    setState: patch => states.push(patch), snapshot: () => ({ authenticated: true }),
+    probeAuthentication: async () => { probes += 1; return { authenticated: true }; },
+    withManualOperation: BrowserHost.prototype.withManualOperation,
+  };
+  await assert.rejects(BrowserHost.prototype.refreshAuthentication.call(fixture, 5), /saved-session navigation timed out/);
+  assert.equal(stops, 1);
+  assert.equal(fixture.manualOperation, null);
+  assert.equal(fixture.sessionRefreshOperation, null);
+  assert.equal(probes, 0);
+  finishLoad();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(states.some(state => state.status === "ready"), false);
+  contents.loadURL = async () => {};
+  await BrowserHost.prototype.refreshAuthentication.call(fixture, 50);
+  assert.equal(probes, 1);
+  assert.equal(fixture.manualOperation, null);
+});
+
+test("a stalled renderer authentication probe releases its lock and ignores late success", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let finishInspection;
+  const contents = {
+    isDestroyed: () => false, getURL: () => "https://chatgpt.com/?temporary-chat=true",
+    executeJavaScript: () => new Promise(resolve => { finishInspection = resolve; }),
+  };
+  const fixture = {
+    state: { authenticated: true }, activeTraceId: null, manualOperation: null,
+    view: { webContents: contents }, logger: { info() {} },
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    snapshot() { return { ...this.state }; },
+  };
+  const pending = BrowserHost.prototype.probeAuthentication.call(fixture);
+  await Promise.resolve();
+  t.mock.timers.tick(6_000);
+  const failed = await pending;
+  assert.equal(failed.authenticated, false);
+  assert.equal(failed.status, "error");
+  assert.equal(fixture.authenticationProbe, null);
+  const success = { composer: true, temporary: true, sessionAuthenticated: true, readyState: "complete" };
+  finishInspection(success);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.state.authenticated, false, "a timed-out inspection must not publish late authentication");
+  contents.executeJavaScript = async () => success;
+  assert.equal((await BrowserHost.prototype.probeAuthentication.call(fixture)).authenticated, true);
+});
+
 test("manual browser operations disable background throttling until completion", async () => {
   const throttling = [];
   const surfaces = [];

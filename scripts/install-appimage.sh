@@ -22,13 +22,29 @@ test -f "$target"
 # Validate the exact artifact with isolated data before stopping the installed app.
 scratch=$(mktemp -d "$state/smoke-XXXXXX")
 chmod +x "$source_image"
-CODEX_WEB_GPT_LAUNCHER_DATA_DIR="$scratch/launcher" CODEX_CHATGPT_WEB_HOME="$scratch/core" CODEX_WEB_GPT_SMOKE_FILE="$scratch/ready.json" timeout 90 "$source_image" --launcher-smoke-test > "$scratch/smoke.log" 2>&1
+CODEX_HOME="$scratch/codex" CODEX_WEB_GPT_LAUNCHER_DATA_DIR="$scratch/launcher" CODEX_CHATGPT_WEB_HOME="$scratch/core" CODEX_WEB_GPT_SMOKE_FILE="$scratch/ready.json" timeout 90 "$source_image" --launcher-smoke-test > "$scratch/smoke.log" 2>&1
 python3 - "$scratch/ready.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]));assert m['ok'] and m['runtimeVerified'] and m['packaged']
 PY
 backup="$target.backup-$(date -u +%Y%m%dT%H%M%SZ)"
 cp -p -- "$target" "$backup"
+# Keep drain and compensation inside this process, not separate agent/tool steps.
+lease="$scratch/drain-lease.json"
+cleanup() {
+  code=$?
+  trap - EXIT INT TERM HUP
+  if ! python3 "$root/scripts/appimage-maintenance.py" release "$lease"; then
+    echo "Could not release the original daemon's drain. Maintenance logs: $scratch" >&2
+    code=1
+  fi
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+python3 "$root/scripts/appimage-maintenance.py" acquire "$lease" --config "${CODEX_CHATGPT_WEB_HOME:-$HOME/.codex-chatgpt-web}/config.json"
 python3 "$root/scripts/stop-owned-appimage.py" "$target"
 install -m 755 -- "$source_image" "$target.new"
 mv -f -- "$target.new" "$target"

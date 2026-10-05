@@ -102,6 +102,24 @@ const CHATGPT_VIEWPORT_CSS = `
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function browserOperationDeadline(action, timeoutMs, message, onTimeout = () => {}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return Promise.reject(new Error("Browser operation timeout must be positive"));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(message));
+      try { onTimeout(); } catch { /* Preserve the original timeout diagnosis. */ }
+    }, timeoutMs);
+    const settle = (callback, result) => { clearTimeout(timer); callback(result); };
+    try {
+      Promise.resolve(action()).then(result => settle(resolve, result), error => settle(reject, error));
+    } catch (error) {
+      settle(reject, error);
+    }
+  });
+}
+
 function javaScriptLiteral(value) {
   return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
@@ -2645,7 +2663,10 @@ class BrowserHost {
         this.logger.info("browser.login_opened");
         const current = this.view.webContents.getURL();
         if (this.reauthenticationRequired || !current.startsWith(CHATGPT_ORIGIN)) {
-          await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+          const contents = this.view.webContents;
+          await browserOperationDeadline(() => contents.loadURL(TEMPORARY_CHAT_URL),
+            BROWSER_NAVIGATION_TIMEOUT_MS, "ChatGPT authentication navigation timed out.",
+            () => { if (!contents.isDestroyed()) contents.stop(); });
         }
         await this.probeAuthentication();
         const authenticated = await this.waitForAuthenticated();
@@ -2816,13 +2837,18 @@ class BrowserHost {
     });
   }
 
-  refreshAuthentication() {
+  refreshAuthentication(timeoutMs = BROWSER_NAVIGATION_TIMEOUT_MS) {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication refresh");
     if (this.sessionRefreshOperation) return this.sessionRefreshOperation;
     const operation = this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
       if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+        const contents = this.view.webContents;
+        await browserOperationDeadline(
+          () => contents.loadURL(TEMPORARY_CHAT_URL), timeoutMs,
+          "ChatGPT saved-session navigation timed out. Check your connection and retry.",
+          () => { if (!contents.isDestroyed()) contents.stop(); },
+        );
       }
       const state = await this.probeAuthentication();
       if (state.authenticated) {
@@ -2861,7 +2887,7 @@ class BrowserHost {
         this.setState({ status: "signed-out", message: "Sign in to ChatGPT", authenticated: false, url });
         return this.snapshot();
       }
-      const probe = (contents) => contents.executeJavaScript(`(async () => {
+      const probe = (contents) => browserOperationDeadline(() => contents.executeJavaScript(`(async () => {
         const expectedUrl = new URL(${JSON.stringify(TEMPORARY_CHAT_URL)});
         const readSurface = () => {
           const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
@@ -2880,7 +2906,8 @@ class BrowserHost {
           ? await (${readChatGptAuthSession.toString()})(fetch.bind(globalThis), expectedUrl.origin, ${CHATGPT_AUTH_SESSION_TIMEOUT_MS})
           : { sessionAuthenticated: false, sessionCheckError: null };
         return { ...readSurface(), ...session };
-      })()`, true).catch(() => ({
+      })()`, true), CHATGPT_AUTH_SESSION_TIMEOUT_MS + 1_000,
+      "ChatGPT session verification could not inspect the browser. Retry after the page finishes loading.").catch(() => ({
         url: "",
         composer: false,
         temporary: false,
@@ -2896,7 +2923,10 @@ class BrowserHost {
         if (authResult.sessionAuthenticated) {
           const completedAuthView = this.authView;
           this.closeAuthView(completedAuthView, true, false);
-          await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+          const contents = this.view.webContents;
+          await browserOperationDeadline(() => contents.loadURL(TEMPORARY_CHAT_URL),
+            BROWSER_NAVIGATION_TIMEOUT_MS, "ChatGPT authentication navigation timed out.",
+            () => { if (!contents.isDestroyed()) contents.stop(); });
           url = this.view.webContents.getURL();
           result = await probe(this.view.webContents);
         }
@@ -2905,7 +2935,10 @@ class BrowserHost {
         && result.sessionAuthenticated
         && !result.temporary
         && !this.view.webContents.isDestroyed()) {
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+        const contents = this.view.webContents;
+        await browserOperationDeadline(() => contents.loadURL(TEMPORARY_CHAT_URL),
+          BROWSER_NAVIGATION_TIMEOUT_MS, "ChatGPT authentication navigation timed out.",
+          () => { if (!contents.isDestroyed()) contents.stop(); });
         url = this.view.webContents.getURL();
         result = await probe(this.view.webContents);
       }

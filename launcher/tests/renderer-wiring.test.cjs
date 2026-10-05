@@ -10,7 +10,7 @@ const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.c
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 
-test("Bigger Context waits for startup and route recovery without invalidating healthy setup", async () => {
+test("startup preserves the owner's Codex route while settings wait for runtime recovery", async () => {
   const vm = require("node:vm");
   for (const fails of [false, true]) {
     let completeAuthentication;
@@ -42,7 +42,7 @@ test("Bigger Context waits for startup and route recovery without invalidating h
       runtimeHost: {
         upgradeManagedRuntime: async () => ({ updated: false }),
         runtimeConfigSnapshot: () => ({ configured: true, config }),
-        connectBridgeRoute: async () => { calls.push("route"); return { changed: false }; },
+        connectBridgeRoute: async () => { assert.fail("startup must not reconnect an owner-disconnected Codex route"); },
         setBiggerContext: async enabled => {
           assert.equal(startupSettled, true, "settings must wait through startup recovery too");
           calls.push("setting");
@@ -61,7 +61,7 @@ test("Bigger Context waits for startup and route recovery without invalidating h
     assert.deepEqual(calls, []);
     completeAuthentication();
     await setting;
-    assert.deepEqual(calls, fails ? ["startup", "recovery", "setting"] : ["startup", "route", "setting"]);
+    assert.deepEqual(calls, fails ? ["startup", "recovery", "setting"] : ["startup", "setting"]);
     assert.equal(state.experimentalBiggerContext, true);
     assert.equal(state.coreSetupComplete, !fails, "only a real startup failure may invalidate setup");
   }
@@ -387,11 +387,12 @@ test("saved ChatGPT authentication is refreshed before setup is presented", () =
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
-  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
   assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
   assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
-  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
+  const startupEnd = electronMain.indexOf('  app.on("before-quit"', runtimeStart);
+  assert.doesNotMatch(electronMain.slice(runtimeStart, startupEnd), /runtimeHost\.connectBridgeRoute\(/,
+    "starting the runtime must preserve the owner's current Codex route");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });
 
