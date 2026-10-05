@@ -52,10 +52,15 @@ launcher-owned codex-chatgpt-web daemon
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
 - On Unix, the broker binds a private socket name and publishes the configured endpoint as a
   hard link. Closing a retired listener cannot unlink a replacement at that public endpoint.
-  Turn registration and `/healthz` restore a missing public name only from the same verified
+  A non-persistent filesystem watcher restores a missing name immediately; a five-second local
+  inode audit covers lost watch events. Turn registration and `/healthz` also restore it from the same verified
   listener inode, preserving active capabilities and calls. A foreign replacement is retained
   and makes health return HTTP 503 with `broker_ready: false`; health never grants access or
-  retries a tool call. Windows retains its named-pipe transport.
+  retries a tool call. Clients tolerate a missing name for up to 500 ms only before connecting;
+  once connected, requests and uncertain results are never replayed. Shutdown stops maintenance
+  before closing its own listener and cannot delete an unstarted/foreign broker. Windows retains
+  its named-pipe transport. Direct Bun tests preload a disposable runtime home, so default adapter
+  objects and test teardown cannot reach the installed broker.
 
 ### Repository DEV driver
 

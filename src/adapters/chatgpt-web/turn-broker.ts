@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, unlinkSync, watch, type FSWatcher } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
 import {
   CompactionTransactionStore,
@@ -279,6 +279,10 @@ export class TurnBroker implements TurnBrokerOwner {
   private startPromise?: Promise<void>;
   private socketIdentity?: { dev: number; ino: number };
   private boundSocketPath?: string;
+  private endpointWatcher?: FSWatcher;
+  private endpointAudit?: ReturnType<typeof setInterval>;
+  private endpointFailure?: string;
+  private closing = false;
 
   private constructor(readonly socketPath: string) {}
 
@@ -289,7 +293,9 @@ export class TurnBroker implements TurnBrokerOwner {
    * instead of the broker's own answer. The endpoint belongs to the runtime's lifetime.
    */
   async listen(): Promise<void> {
+    if (this.closing) throw new Error("ChatGPT web broker is closing");
     await this.start();
+    if (this.closing) throw new Error("ChatGPT web broker is closing");
     this.restoreEndpoint();
   }
 
@@ -755,6 +761,12 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    await this.startPromise?.catch(() => undefined);
+    this.endpointWatcher?.close();
+    this.endpointWatcher = undefined;
+    clearInterval(this.endpointAudit);
+    this.endpointAudit = undefined;
     this.compactionTransactions.close();
     for (const token of [...this.channels.keys()]) this.revoke(token);
     const server = this.server;
@@ -799,13 +811,48 @@ export class TurnBroker implements TurnBrokerOwner {
       // The published name can prove ownership if only the private name was removed.
       verify(this.socketPath);
       linkSync(this.socketPath, bound);
+      console.info(`[chatgpt-web] broker endpoint restored pid=${process.pid} name=private`);
     }
     verify(bound);
     if (!existsSync(this.socketPath)) {
-      try { linkSync(bound, this.socketPath); }
+      try {
+        linkSync(bound, this.socketPath);
+        console.info(`[chatgpt-web] broker endpoint restored pid=${process.pid} name=public`);
+      }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     }
     verify(this.socketPath);
+  }
+
+  /** The MCP client must not depend on another HTTP health request to repair its endpoint. */
+  private watchEndpoint(): void {
+    if (this.closing || isWindowsPipeEndpoint(this.socketPath)) return;
+    const privateName = basename(this.boundSocketPath!);
+    const repair = () => {
+      if (!this.server?.listening) return;
+      try {
+        this.restoreEndpoint();
+        if (this.endpointFailure) console.info(`[chatgpt-web] broker endpoint recovered pid=${process.pid}`);
+        this.endpointFailure = undefined;
+      } catch (error) {
+        const message = errorOf(error).message;
+        if (message !== this.endpointFailure) {
+          console.error(`[chatgpt-web] broker endpoint degraded pid=${process.pid}: ${message}`);
+        }
+        this.endpointFailure = message;
+      }
+    };
+    this.endpointWatcher = watch(dirname(this.socketPath), { persistent: false }, (_event, name) => {
+      if (name === null || name.toString() === basename(this.socketPath)
+        || name.toString() === privateName) repair();
+    });
+    this.endpointWatcher.on("error", error => {
+      console.error(`[chatgpt-web] broker endpoint watcher error pid=${process.pid}: ${error.message}`);
+    });
+    // Also cover coalesced/lost filesystem events, without network traffic or a process restart.
+    this.endpointAudit = setInterval(repair, 5_000);
+    this.endpointAudit.unref?.();
+    repair();
   }
 
   private start(): Promise<void> {
@@ -851,6 +898,7 @@ export class TurnBroker implements TurnBrokerOwner {
               this.socketIdentity = { dev, ino };
               chmodSync(bound, 0o600);
               this.restoreEndpoint();
+              this.watchEndpoint();
             }
             resolveStart();
           } catch (error) {
@@ -1312,12 +1360,60 @@ export class TurnBrokerTimeoutError extends Error {
   }
 }
 
+/** Retry only a failed connect: no request bytes or tool effects have crossed the broker yet. */
+function connectBroker(socketPath: string, timeoutMs: number | null, signal?: AbortSignal): Promise<Socket> {
+  return new Promise((resolveConnect, rejectConnect) => {
+    const deadline = Date.now() + Math.min(timeoutMs ?? 500, 500);
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let socket: Socket;
+    let settled = false;
+    const timer = setTimeout(() => fail(new TurnBrokerTimeoutError()), timeoutMs ?? 5_000);
+    const cleanup = () => {
+      clearTimeout(retry);
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket?.destroy();
+      rejectConnect(error);
+    };
+    const abort = () => fail(new DOMException("ChatGPT web turn broker call aborted", "AbortError"));
+    const attempt = () => {
+      if (settled) return;
+      socket = createConnection(socketPath);
+      socket.once("error", error => {
+        socket.destroy();
+        if ((error as NodeJS.ErrnoException).code === "ENOENT" && Date.now() < deadline && !settled) {
+          retry = setTimeout(attempt, Math.min(20, deadline - Date.now()));
+        } else {
+          fail(new Error(`ChatGPT web turn broker unavailable: ${error.message}`));
+        }
+      });
+      socket.once("connect", () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        socket.removeAllListeners("error");
+        resolveConnect(socket);
+      });
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    else attempt();
+  });
+}
+
 export async function callTurnBroker<T>(
   socketPath: string,
   request: Omit<BrokerRequest, "id">,
   timeoutMs: number | null = 5_000,
   signal?: AbortSignal,
 ): Promise<T> {
+  const startedAt = Date.now();
+  const socket = await connectBroker(socketPath, timeoutMs, signal);
   const id = opaqueId("request");
   const settleOnResponseFrame = timeoutMs === null;
   // The wire protocol requires a client-owned activity identity. Most callers never need to see
@@ -1327,7 +1423,6 @@ export async function callTurnBroker<T>(
     ? { ...request, activityId: opaqueId("activity") }
     : request;
   return new Promise<T>((resolveCall, rejectCall) => {
-    const socket = createConnection(socketPath);
     let buffered = "";
     let settled = false;
     let response: BrokerResponse | undefined;
@@ -1355,7 +1450,7 @@ export async function callTurnBroker<T>(
     };
     const timer = timeoutMs === null
       ? undefined
-      : setTimeout(() => finishError(new TurnBrokerTimeoutError()), timeoutMs);
+      : setTimeout(() => finishError(new TurnBrokerTimeoutError()), Math.max(0, timeoutMs - (Date.now() - startedAt)));
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) {
       finishError(new DOMException("ChatGPT web turn broker call aborted", "AbortError"));
@@ -1366,7 +1461,7 @@ export async function callTurnBroker<T>(
     // The server owns response termination. Bounded calls wait for the pipe/socket to close
     // before their callers can advance the lifecycle while Bun drains named-pipe writes.
     socket.once("close", finishResponse);
-    socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...wireRequest })}\n`));
+    socket.write(`${JSON.stringify({ id, ...wireRequest })}\n`);
     socket.on("data", chunk => {
       if (settled || response) return;
       buffered += chunk;

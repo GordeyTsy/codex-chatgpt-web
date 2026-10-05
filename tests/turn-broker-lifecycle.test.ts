@@ -16,14 +16,121 @@ test.skipIf(process.platform === "win32")("a removed broker name is restored wit
       sandboxPolicy: { type: "dangerFullAccess" }, tools: [] }, 10_000);
     const identity = statSync(endpoint);
     unlinkSync(endpoint);
-    await expect(callTurnBroker(endpoint, { method: "claim", token })).rejects.toThrow("ENOENT");
-    await broker.listen();
+    // No listen/health/registration request is allowed to trigger this repair.
+    const claimed = await callTurnBroker<{ bindingId: string }>(endpoint, { method: "claim", token });
     expect(statSync(endpoint).ino).toBe(identity.ino);
     expect(statSync(endpoint).mode & 0o777).toBe(0o600);
-    const claimed = await callTurnBroker<{ bindingId: string }>(endpoint, { method: "claim", token });
     expect(claimed.bindingId).toBeString();
   } finally {
     await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("closing a never-started broker does not remove another process's endpoint", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-unstarted-"));
+  const endpoint = join(root, "broker.sock");
+  const owner = createServer();
+  try {
+    await new Promise<void>(resolve => owner.listen(endpoint, resolve));
+    chmodSync(endpoint, 0o600);
+    const before = statSync(endpoint);
+    await TurnBroker.forSocket(endpoint).close();
+    expect(statSync(endpoint).ino).toBe(before.ino);
+  } finally {
+    await new Promise<void>(resolve => owner.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("a pending invocation survives unlink and its result is delivered once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-pending-"));
+  const endpoint = join(root, "broker.sock");
+  const broker = TurnBroker.forSocket(endpoint);
+  try {
+    const token = await broker.register({ cwd: root, roots: [root], writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" }, tools: [] });
+    const { bindingId } = await callTurnBroker<{ bindingId: string }>(endpoint, { method: "claim", token });
+    const result = callTurnBroker(endpoint, { method: "invoke", bindingId, wireName: "test_tool", arguments: {} }, null);
+    const [request] = await broker.nextToolBatch(token);
+    unlinkSync(endpoint);
+    await callTurnBroker(endpoint, { method: "owner_complete", token, callId: request!.callId,
+      toolResult: { content: [{ type: "text", text: "done" }] } });
+    expect(await result).toEqual({ content: [{ type: "text", text: "done" }] });
+    expect(broker.beginCompletionFence(token)).toBeUndefined(); // Claim activity still owns its lease.
+    await expect(callTurnBroker(endpoint, { method: "owner_complete", token, callId: request!.callId,
+      toolResult: { content: [] } })).rejects.toThrow("not pending");
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("closing while the listener starts never leaves a published socket or watcher", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-start-close-"));
+  const endpoint = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(endpoint);
+  try {
+    const listening = broker.listen().catch(error => error);
+    await broker.close();
+    await listening;
+    if (process.platform !== "win32") expect(existsSync(endpoint)).toBeFalse();
+    await expect(broker.listen()).rejects.toThrow("closing");
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("a missing name is retried only before connect and sends one request", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-connect-gap-"));
+  const endpoint = join(root, "broker.sock");
+  let requests = 0;
+  const server = createServer(socket => socket.once("data", bytes => {
+    requests += 1;
+    const request = JSON.parse(bytes.toString().trim());
+    socket.end(JSON.stringify({ id: request.id, result: "one effect" }) + "\n");
+  }));
+  try {
+    const result = callTurnBroker(endpoint, { method: "owner_status" });
+    await Bun.sleep(40);
+    await new Promise<void>(resolve => server.listen(endpoint, resolve));
+    expect(await result).toBe("one effect");
+    expect(requests).toBe(1);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a lost response after request delivery is never retried", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-response-lost-"));
+  const endpoint = defaultBrokerEndpoint(root);
+  mkdirSync(dirname(endpoint), { recursive: true });
+  let requests = 0;
+  const server = createServer(socket => socket.once("data", () => {
+    requests += 1;
+    socket.destroy();
+  }));
+  try {
+    await new Promise<void>(resolve => server.listen(endpoint, resolve));
+    await expect(callTurnBroker(endpoint, { method: "owner_status" })).rejects.toThrow("closed the connection");
+    await Bun.sleep(50);
+    expect(requests).toBe(1);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("cancellation during endpoint repair stops connection retries", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-connect-abort-"));
+  const controller = new AbortController();
+  try {
+    const result = callTurnBroker(join(root, "missing.sock"), { method: "owner_status" }, null, controller.signal);
+    controller.abort();
+    await expect(result).rejects.toThrow("aborted");
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
