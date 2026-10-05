@@ -73,6 +73,10 @@ export class ChatGptTraceFeed {
     return this.queued.splice(0);
   }
 
+  reset(): void {
+    this.queued.length = 0;
+  }
+
   wait(signal?: AbortSignal): Promise<void> {
     if (this.queued.length > 0) return Promise.resolve();
     if (signal?.aborted) return Promise.reject(new DOMException("trace wait aborted", "AbortError"));
@@ -120,6 +124,11 @@ export class ChatGptTextFeed {
 
   value(): string {
     return this.text;
+  }
+
+  reset(newText = ""): void {
+    this.text = newText;
+    this.queued.length = 0;
   }
 
   wait(signal?: AbortSignal): Promise<void> {

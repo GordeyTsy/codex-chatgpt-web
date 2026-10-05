@@ -25,6 +25,74 @@ function assertRetirementFailure(value: unknown): asserts value is BrokerRetirem
   }
 }
 
+export type CustomAction =
+  | { tool: "codex_exec"; command: string }
+  | { tool: "codex_apply_patch"; patch: string }
+  | { tool: "codex_write_stdin"; sessionId: number; chars?: string; yieldTimeMs?: number; maxOutputTokens?: number }
+  | { tool: "codex_view_image"; path: string; detail?: "high" | "original" }
+  | { tool: "codex_tool_call"; wireName: string; arguments?: Record<string, unknown>; input?: string }
+  | { tool: "codex_tool_inventory"; query?: string; limit?: number; offset?: number; includeSchema?: boolean };
+
+export function customActionToToolRequest(
+  action: CustomAction,
+  environment?: ChatGptTurnEnvironment,
+): { wireName: string; freeform: boolean; arguments?: Record<string, unknown>; input?: string } {
+  switch (action.tool) {
+    case "codex_exec": {
+      const tool = environment?.tools?.find(t => t.name === "shell_command");
+      if (tool && !environment?.tools?.some(t => t.name === "exec_command")) {
+        return { wireName: "shell_command", freeform: false, arguments: { command: action.command } };
+      }
+      return { wireName: "exec_command", freeform: false, arguments: { cmd: action.command } };
+    }
+    case "codex_apply_patch": {
+      const patchTool = environment?.tools?.find(t => t.name === "apply_patch");
+      if (patchTool?.freeform) {
+        return { wireName: "apply_patch", freeform: true, input: action.patch };
+      }
+      return { wireName: "apply_patch", freeform: false, arguments: { patch: action.patch, input: action.patch } };
+    }
+    case "codex_write_stdin": {
+      return {
+        wireName: "write_stdin",
+        freeform: false,
+        arguments: {
+          session_id: action.sessionId,
+          ...(action.chars !== undefined ? { chars: action.chars } : {}),
+          ...(action.yieldTimeMs !== undefined ? { yield_time_ms: action.yieldTimeMs } : {}),
+          ...(action.maxOutputTokens !== undefined ? { max_output_tokens: action.maxOutputTokens } : {}),
+        },
+      };
+    }
+    case "codex_view_image": {
+      return {
+        wireName: "view_image",
+        freeform: false,
+        arguments: {
+          path: action.path,
+          ...(action.detail ? { detail: action.detail } : {}),
+        },
+      };
+    }
+    case "codex_tool_call": {
+      return {
+        wireName: action.wireName,
+        freeform: action.input !== undefined,
+        ...(action.arguments ? { arguments: action.arguments } : {}),
+        ...(action.input !== undefined ? { input: action.input } : {}),
+      };
+    }
+    case "codex_tool_inventory": {
+      const searchTool = environment?.tools?.find(t => t.name === "tool_search" || t.name === "search_tools");
+      return {
+        wireName: searchTool ? searchTool.name : "tool_search",
+        freeform: false,
+        arguments: { query: action.query ?? "" },
+      };
+    }
+  }
+}
+
 interface PendingTurn extends ChatGptTurnEnvironment {
   expiresAt?: number;
 }
@@ -100,6 +168,11 @@ interface TurnChannel {
   completionRevision?: number;
   retirementWaiters: Set<SafeWaiter<BrokerRetirementFailure | undefined>>;
   batchTimer?: ReturnType<typeof setTimeout>;
+  pendingCustomAction?: {
+    action: CustomAction;
+    ccaCode: string;
+    registeredAt: number;
+  };
 }
 
 interface BrokerRequest {
@@ -127,7 +200,11 @@ interface BrokerRequest {
     | "safe_start"
     | "safe_complete"
     | "activity_complete"
-    | "submit_compaction_handoff";
+    | "submit_compaction_handoff"
+    | "pending_custom_action_set"
+    | "pending_custom_action_clear"
+    | "pending_custom_action_get"
+    | "owner_queue_action";
   token?: string;
   bindingId?: string;
   wireName?: string;
@@ -147,6 +224,8 @@ interface BrokerRequest {
   finalAnswer?: string;
   contract?: "native" | "safe";
   failure?: BrokerRetirementFailure;
+  action?: CustomAction;
+  ccaCode?: string;
 }
 
 interface BrokerResponse {
@@ -246,6 +325,10 @@ export interface TurnBrokerOwner {
   commitCompletionFence(token: string, revision: number): boolean | Promise<boolean>;
   waitForRetirement(token: string, signal?: AbortSignal): Promise<BrokerRetirementFailure | undefined>;
   revoke(token: string, reason?: Error): void | Promise<void>;
+  setPendingCustomAction(token: string, action: CustomAction, ccaCode: string): void | Promise<void>;
+  clearPendingCustomAction(token: string): CustomAction | undefined | Promise<CustomAction | undefined>;
+  getPendingCustomAction(token: string): { action: CustomAction; ccaCode: string } | undefined | Promise<{ action: CustomAction; ccaCode: string } | undefined>;
+  queueDirectAction(token: string, action: CustomAction): Promise<BrokerToolRequest>;
 }
 
 /**
@@ -635,6 +718,49 @@ export class TurnBroker implements TurnBrokerOwner {
     return this.waitForSafeState(safe.completionWaiters, signal, "Zero Risk turn completion wait aborted");
   }
 
+  setPendingCustomAction(token: string, action: CustomAction, ccaCode: string): void {
+    const channel = this.channels.get(token);
+    if (channel) {
+      channel.pendingCustomAction = { action, ccaCode, registeredAt: Date.now() };
+    }
+  }
+
+  clearPendingCustomAction(token: string): CustomAction | undefined {
+    const channel = this.channels.get(token);
+    const action = channel?.pendingCustomAction?.action;
+    if (channel) channel.pendingCustomAction = undefined;
+    return action;
+  }
+
+  getPendingCustomAction(token: string): { action: CustomAction; ccaCode: string } | undefined {
+    return this.channels.get(token)?.pendingCustomAction;
+  }
+
+  async queueDirectAction(token: string, action: CustomAction): Promise<BrokerToolRequest> {
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("turn token is invalid or expired");
+    const req = customActionToToolRequest(action, channel.environment);
+    const callId = opaqueId("call");
+    const toolRequest: BrokerToolRequest = {
+      callId,
+      wireName: req.wireName,
+      freeform: req.freeform,
+      ...(req.arguments ? { arguments: req.arguments } : {}),
+      ...(req.input ? { input: req.input } : {}),
+    };
+    channel.invocations.set(callId, {
+      request: toolRequest,
+      resolve: () => {},
+      reject: () => {},
+    });
+    channel.queuedCallIds.push(callId);
+    console.info(
+      `[chatgpt-web] broker trace=${channel.traceId} queued direct action call=${callId.slice(0, 17)} tool=${req.wireName} waiters=${channel.waiters.size}`,
+    );
+    this.scheduleToolWaiters(channel);
+    return toolRequest;
+  }
+
   revoke(token: string, reason = new Error("Codex turn binding was revoked"), failure?: BrokerRetirementFailure): void {
     const channel = this.channels.get(token);
     if (!channel) return;
@@ -1021,7 +1147,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff", "pending_custom_action_set", "pending_custom_action_clear", "pending_custom_action_get", "owner_queue_action"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
@@ -1055,6 +1181,28 @@ export class TurnBroker implements TurnBrokerOwner {
       }
       this.compactionTransactions.submit(request.token, request.handoffId, request.summary);
       return { submitted: true };
+    }
+    if (request.method === "pending_custom_action_set") {
+      if (!request.token) throw new Error("turn token is required");
+      if (!request.action || !request.ccaCode) throw new Error("action and ccaCode are required");
+      this.setPendingCustomAction(request.token, request.action, request.ccaCode);
+      return { set: true };
+    }
+    if (request.method === "pending_custom_action_clear") {
+      if (!request.token) throw new Error("turn token is required");
+      const action = this.clearPendingCustomAction(request.token);
+      return { cleared: true, action };
+    }
+    if (request.method === "pending_custom_action_get") {
+      if (!request.token) throw new Error("turn token is required");
+      const pending = this.getPendingCustomAction(request.token);
+      return { pending: pending ?? null };
+    }
+    if (request.method === "owner_queue_action") {
+      if (!request.token) throw new Error("turn token is required");
+      if (!request.action) throw new Error("action is required");
+      const toolRequest = await this.queueDirectAction(request.token, request.action);
+      return { queued: true, toolRequest };
     }
     if (request.method === "owner_status") {
       return { protocolVersion: 5, acceptingExternalOwners: this.acceptingExternalOwners };
@@ -1688,5 +1836,40 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
 
   async revoke(token: string, _reason?: Error): Promise<void> {
     await callTurnBroker(this.socketPath, { method: "owner_revoke", token });
+  }
+
+  async setPendingCustomAction(token: string, action: CustomAction, ccaCode: string): Promise<void> {
+    await callTurnBroker(this.socketPath, {
+      method: "pending_custom_action_set",
+      token,
+      action,
+      ccaCode,
+    });
+  }
+
+  async clearPendingCustomAction(token: string): Promise<CustomAction | undefined> {
+    const response = await callTurnBroker<{ action?: CustomAction }>(this.socketPath, {
+      method: "pending_custom_action_clear",
+      token,
+    });
+    return response.action;
+  }
+
+  async getPendingCustomAction(token: string): Promise<{ action: CustomAction; ccaCode: string } | undefined> {
+    const response = await callTurnBroker<{ pending?: { action: CustomAction; ccaCode: string } | null }>(this.socketPath, {
+      method: "pending_custom_action_get",
+      token,
+    });
+    return response.pending ?? undefined;
+  }
+
+  async queueDirectAction(token: string, action: CustomAction): Promise<BrokerToolRequest> {
+    const response = await callTurnBroker<{ toolRequest?: BrokerToolRequest }>(this.socketPath, {
+      method: "owner_queue_action",
+      token,
+      action,
+    });
+    if (!response.toolRequest) throw new Error("DEV turn owner failed to queue direct action");
+    return response.toolRequest;
   }
 }

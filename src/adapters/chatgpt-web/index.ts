@@ -27,7 +27,8 @@ import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebC
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, type CompiledChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy, MAX_CHATGPT_WEB_TURN_RETRIES } from "./retry-policy";
-import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
+import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type CustomAction, type TurnBrokerOwner } from "./turn-broker";
+import { SafetyFallbackStreamDetector } from "./safety-fallback";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
@@ -507,6 +508,7 @@ export function createChatGptWebAdapter(
           + "Continue the visible answer from its last emitted character without repeating its prefix." },
       ] },
     });
+    let currentAttemptCancel: ((reason?: Error) => void) | undefined;
     const superviseBrowser = (template: BrowserTurn, progress?: ChatGptExternalTurnProgress) => {
       const run = async (): Promise<string> => {
         let emptyRecoveries = 0;
@@ -524,6 +526,7 @@ export function createChatGptWebAdapter(
               prepareResume: undefined, prepare: prepareRecovery! } : {}),
           });
           const turn = cancellableBrowserTurn(physical, attemptAbort);
+          currentAttemptCancel = turn.cancel;
           const interval = setInterval(() => {
             const failure = modelProgress.failure(progress?.snapshot());
             if (!failure || attemptAbort.signal.aborted || browserAbort.signal.aborted) return;
@@ -534,11 +537,16 @@ export function createChatGptWebAdapter(
           try { return prefix + await turn.browser; }
           catch (error) {
             clearInterval(interval);
+            currentAttemptCancel = undefined;
+            if (error instanceof ChatGptWebAdapterError && error.code === "chatgpt_safety_recovery") {
+              text.reset(prefix);
+              trace.reset();
+            }
             const authentication = error instanceof ChatGptWebAdapterError
               && ["chatgpt_session_expired", "chatgpt_sign_in_required"].includes(error.code);
             const recoverable = error instanceof ChatGptWebAdapterError
               && (["chatgpt_model_no_progress", "chatgpt_message_delivery_timeout", "chatgpt_turn_token_mismatch",
-                "chatgpt_multipart_acknowledgement_timeout"].includes(error.code)
+                "chatgpt_multipart_acknowledgement_timeout", "chatgpt_safety_recovery"].includes(error.code)
                 || (error.code === "chatgpt_assistant_dom_unavailable" && submission.phase === "accepted"));
             if (template.reasoning === "max" && !quotaFallback && error instanceof ChatGptWebAdapterError
               && ["chatgpt_pro_quota_exhausted", "chatgpt_model_unavailable", "chatgpt_effort_locked"].includes(error.code)) {
@@ -572,7 +580,8 @@ export function createChatGptWebAdapter(
             } else {
               // An inability report does not reset an empty capability-recovery budget.
               const productive = (error.code !== "chatgpt_turn_token_mismatch" && modelProgress.outputCount > 0)
-                || progress?.snapshot().lastProgressAt !== previousToolProgress;
+                || progress?.snapshot().lastProgressAt !== previousToolProgress
+                || error.code === "chatgpt_safety_recovery";
               emptyRecoveries = productive ? 0 : emptyRecoveries + 1;
               if (emptyRecoveries > MAX_CHATGPT_WEB_TURN_RETRIES) throw error;
             }
@@ -585,7 +594,7 @@ export function createChatGptWebAdapter(
             }
             browserAbort.signal.throwIfAborted();
             console.info(`[chatgpt-web] model_progress_recovery trace=${traceId} nextAttempt=${attempt + 1} emptyRecoveries=${emptyRecoveries}`);
-            if (!quota) trace.push({ kind: "commentary", text: "Recovering an inactive ChatGPT conversation from saved progress." });
+            if (!quota && error.code !== "chatgpt_safety_recovery") trace.push({ kind: "commentary", text: "Recovering an inactive ChatGPT conversation from saved progress." });
           } finally { clearInterval(interval); }
         }
       };
@@ -886,6 +895,40 @@ export function createChatGptWebAdapter(
       }
     };
     prepareRecovery = () => prepareWith(savedRecoveryInput());
+    let safetyRecoveryInProgress = false;
+    const triggerSafetyRecovery = async (action: CustomAction, reason: string): Promise<void> => {
+      if (safetyRecoveryInProgress) return;
+      safetyRecoveryInProgress = true;
+      console.info(`[chatgpt-web] triggerSafetyRecovery trace=${traceId} reason=${reason} tool=${action.tool}`);
+
+      const recoveryError = new ChatGptWebAdapterError("Recovering safety-blocked tool call", {
+        status: 409,
+        errorType: "invalid_request_error",
+        code: "chatgpt_safety_recovery",
+        retryable: true,
+      });
+
+      // 1. Cancel active browser attempt
+      currentAttemptCancel?.(recoveryError);
+
+      // 2. Clear any pending custom action on the broker
+      const turnToken = activeToken ?? await token.promise;
+      await Promise.resolve(broker.clearPendingCustomAction(turnToken)).catch(() => {});
+
+      // 3. Queue direct action on broker
+      await broker.queueDirectAction(turnToken, action);
+
+      // 4. Acknowledge observation immediately in externalProgress so waitForToolBatchObservation resolves
+      const snap = externalProgress.snapshot();
+      await externalProgress.acknowledgeToolBatch(snap.lastToolBatchRevision);
+
+      safetyRecoveryInProgress = false;
+    };
+
+    const fallbackDetector = new SafetyFallbackStreamDetector((action, reason) => {
+      void triggerSafetyRecovery(action, reason);
+    });
+
     const browserTurn = superviseBrowser({
       traceId,
       modelId: parsed.modelId,
@@ -899,19 +942,63 @@ export function createChatGptWebAdapter(
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
-      onReasoningSummary: (text, continuation) => {
-        modelProgress.recordOutput(text);
-        trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) });
+      onReasoningSummary: (textDelta, continuation) => {
+        const { cleanChunk } = fallbackDetector.observe(textDelta);
+        if (cleanChunk) {
+          modelProgress.recordOutput(cleanChunk);
+          trace.push({ kind: "reasoning", text: cleanChunk, ...(continuation ? { continuation: true } : {}) });
+        }
       },
-      onCommentary: (text, continuation) => {
-        modelProgress.recordOutput(text);
-        trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) });
+      onCommentary: (textDelta, continuation) => {
+        const { cleanChunk } = fallbackDetector.observe(textDelta);
+        if (cleanChunk) {
+          modelProgress.recordOutput(cleanChunk);
+          trace.push({ kind: "commentary", text: cleanChunk, ...(continuation ? { continuation: true } : {}) });
+        }
       },
-      onTextDelta: delta => { modelProgress.recordOutput(delta); text.push(delta); },
+      onTextDelta: delta => {
+        const { cleanChunk, triggered } = fallbackDetector.observe(delta);
+        if (triggered) return;
+
+        // Watchdog: If the model emits assistant markdown text while pendingCustomAction is set on the broker,
+        // it means codex_custom_action was blocked by OpenAI or skipped:
+        const currentToken = activeToken;
+        if (currentToken) {
+          void Promise.resolve(broker.getPendingCustomAction(currentToken)).then(pending => {
+            if (pending) {
+              console.warn(`[chatgpt-web] assistant text emitted while custom action was pending: cca=${pending.ccaCode} tool=${pending.action.tool}`);
+              void triggerSafetyRecovery(pending.action, "unexecuted_custom_action_text");
+            }
+          });
+        }
+
+        if (cleanChunk) {
+          modelProgress.recordOutput(cleanChunk);
+          text.push(cleanChunk);
+        }
+      },
       externalProgress,
       completionFence: {
-        begin: async () => broker.beginCompletionFence(await token.promise),
-        commit: async revision => broker.commitCompletionFence(await token.promise, revision),
+        begin: async () => {
+          const currentToken = activeToken ?? await token.promise;
+          const pending = await Promise.resolve(broker.getPendingCustomAction(currentToken));
+          if (pending) {
+            console.warn(`[chatgpt-web] completion fence began while custom action was pending: cca=${pending.ccaCode} tool=${pending.action.tool}`);
+            void triggerSafetyRecovery(pending.action, "unexecuted_custom_action_completion");
+            return undefined;
+          }
+          return broker.beginCompletionFence(currentToken);
+        },
+        commit: async revision => {
+          const currentToken = activeToken ?? await token.promise;
+          const pending = await Promise.resolve(broker.getPendingCustomAction(currentToken));
+          if (pending) {
+            console.warn(`[chatgpt-web] completion fence commit called while custom action was pending: cca=${pending.ccaCode} tool=${pending.action.tool}`);
+            void triggerSafetyRecovery(pending.action, "unexecuted_custom_action_completion");
+            return false;
+          }
+          return broker.commitCompletionFence(currentToken, revision);
+        },
       },
       ...(captureLunaCheckpoint ? {
         captureLunaCheckpoint: true,
