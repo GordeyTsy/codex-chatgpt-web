@@ -2858,9 +2858,11 @@ export class ChatGptBrowserWorker {
     page: Page,
     timeoutMs = 30_000,
     abortSignal?: AbortSignal,
+    observeSessionWhileWaiting = false,
   ): Promise<Locator> {
     const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
     const deadline = Date.now() + timeoutMs;
+    let nextSessionProbeAt = Date.now() + 1_000;
     let count = 0;
     while (Date.now() < deadline) {
       throwIfPromptAttachmentAborted(abortSignal);
@@ -2872,6 +2874,16 @@ export class ChatGptBrowserWorker {
         abortSignal,
       );
       if (count === 1) return composers.first();
+      // Anonymous-page controls can hydrate after navigation while no supported
+      // editor exists. Classify positive logout evidence before exhausting the
+      // composer budget, without turning every 50ms poll into another DOM scan.
+      if (observeSessionWhileWaiting && Date.now() >= nextSessionProbeAt) {
+        await withBrowserTurnAbort(withChatGptBrowserObservationTimeout(
+          throwIfChatGptSessionFailureAlert(page),
+          Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
+        ), abortSignal);
+        nextSessionProbeAt = Date.now() + 1_000;
+      }
       await withBrowserTurnAbort(
         new Promise(resolveSleep => setTimeout(resolveSleep, 50)),
         abortSignal,
@@ -2901,9 +2913,13 @@ export class ChatGptBrowserWorker {
       });
       await captureDiagnostic?.(useSavedChats ? "saved-chat-navigation-complete" : "temporary-chat-navigation-complete");
     }
-    // A failed page read is not evidence of an expired login. Preserve the actual
-    // observation error; the authenticated-session check below owns login failures.
-    const composer = await this.activeComposer(page);
+    // Check positive session evidence before requiring an authenticated-page
+    // editor. Logged-out pages can lack that editor entirely.
+    await withChatGptBrowserObservationTimeout(
+      throwIfChatGptSessionFailureAlert(page), CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS,
+    );
+    // A failed page read remains an observation error, never inferred logout.
+    const composer = await this.activeComposer(page, 30_000, undefined, true);
     if (!useSavedChats && await dismissChatGptTemporaryChatOnboarding(page)) {
       await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
     }

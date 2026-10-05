@@ -181,6 +181,38 @@ domTest("an anonymous composer with rendered login controls is an authentication
   });
 });
 
+domTest("preparation classifies logout before attempting an unavailable editor", async () => {
+  await withPage(async page => {
+    await page.route("https://chatgpt.com/**", route => route.fulfill({
+      contentType: "text/html", body: '<header><button>Log in</button><button>Sign up for free</button></header>',
+    }));
+    await page.goto("https://chatgpt.com/?temporary-chat=true");
+    let editorReads = 0;
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      activeComposer: async () => { editorReads++; throw new Error("editor unavailable"); },
+    });
+    await expect(worker.prepareChatSurface(page)).rejects.toMatchObject({
+      code: "chatgpt_sign_in_required", status: 401,
+    });
+    expect(editorReads).toBe(0);
+  });
+});
+
+domTest("logout controls appearing during editor hydration stop preparation promptly", async () => {
+  await withPage(async page => {
+    await page.route("https://chatgpt.com/**", route => route.fulfill({
+      contentType: "text/html", body: '<main>Loading</main>',
+    }));
+    await page.goto("https://chatgpt.com/?temporary-chat=true");
+    const worker = Object.create(ChatGptBrowserWorker.prototype);
+    const pending = worker.prepareChatSurface(page);
+    await page.evaluate(() => setTimeout(() => {
+      document.body.innerHTML = '<header><button>Log in</button><button>Sign up</button></header>';
+    }, 100));
+    await expect(pending).rejects.toMatchObject({ code: "chatgpt_sign_in_required", status: 401 });
+  });
+}, 8_000);
+
 domTest("quoted, hidden and partial login controls never classify an authenticated page as logged out", async () => {
   for (const content of [
     '<div data-message-author-role="assistant"><button>Log in</button><button>Sign up for free</button></div>',

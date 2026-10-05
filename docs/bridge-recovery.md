@@ -13,6 +13,9 @@ unsettled tool effect is not permission for a blind retry.
 A visible anonymous composer does not prove authentication. The worker observes
 rendered Login and Signup controls outside conversation messages, expired-session
 alerts and the launcher's authentication-required release evidence.
+Preparation checks this evidence before requiring an editor and while waiting
+for an editor to hydrate. A missing editor alone remains an observation failure;
+it never establishes logout.
 
 On confirmed logout the bridge settles the old helper and preserves the logical
 turn and its results. It enters a human-input wait, with its model watchdog and
