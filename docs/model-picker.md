@@ -39,6 +39,13 @@ closed menu, followed by the production pre-submission confirmation.
 The final local run passed all 112 matrix cases (166.28 s), 15 existing browser
 regressions (143.23 s), 37 model/effort contract tests, and the project typecheck.
 
+The first full build found one unrelated, flaky multipart cancellation assertion.
+That fixture stubs model selection. Waiting with Bun's `.rejects` matcher delayed
+its CDP events until the short acknowledgement deadline could win before owner
+cancellation; direct promise awaiting preserved the intended event processing
+and both fixture cases passed. Only the assertion's waiting method was changed,
+keeping its error, stopped-generation, resource-release and no-final-send checks.
+
 On the authenticated site, the source worker selected and confirmed all six
 public combinations: GPT-5.6 Sol Instant/Medium/High/Extra High, GPT-5.6 Pro Max,
 and GPT-6 Pro Max. It also checked four internal Latest staging levels. This

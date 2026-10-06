@@ -135,9 +135,12 @@ test.each([false, true])("multipart stall keeps final tools unsent and preserves
       prepare: async () => ({ text: "Isolated context", images: [],
         multipart: { parts: ['{"part":1}', '{"part":2}'], commit: "Continue fixture" }, release: () => { released = true; } }),
     }, undefined, page);
-    if (cancel) await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    // Await the browser work outside Bun's rejection matcher. The matcher delays
+    // CDP events enough to race this fixture's short cancellation stage deadline.
+    const outcome = await run.catch((error: unknown) => error);
+    if (cancel) expect(outcome).toMatchObject({ name: "AbortError" });
     else {
-      await expect(run).rejects.toMatchObject({ code: "chatgpt_multipart_acknowledgement_timeout", retryable: false });
+      expect(outcome).toMatchObject({ code: "chatgpt_multipart_acknowledgement_timeout", retryable: false });
       const traceDir = join(diagnostics, readdirSync(diagnostics)[0]!);
       const captures = readdirSync(traceDir).filter(name => name.endsWith(".capture.json"));
       expect(captures).toHaveLength(1);
