@@ -166,6 +166,7 @@ interface ChatGptTurnRuntimeBase {
   manualControl?: { surfaceNonce: string };
   cancel: (reason?: Error) => void;
   isSafetyRecovery?: () => boolean;
+  clearSafetyRecovery?: () => void;
 }
 
 export type ChatGptTurnRuntime =

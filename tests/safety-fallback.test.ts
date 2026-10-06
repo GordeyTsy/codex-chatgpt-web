@@ -216,3 +216,26 @@ describe("turn broker safety recovery methods", () => {
     const stripped = stripSafetyFallback(rawChatGPTOutput);
     expect(stripped).toBe("");
   });
+
+describe("adapter end-to-end safety fallback and namespaced mapping", () => {
+  test("namespacedToolName maps tools correctly in customActionToToolRequest", () => {
+    const { customActionToToolRequest } = require("../src/adapters/chatgpt-web/turn-broker");
+    const env = {
+      cwd: "/tmp",
+      roots: ["/tmp"],
+      writableRoots: ["/tmp"],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [
+        { name: "exec_command", namespace: "default_api", description: "exec", parameters: { type: "object" } },
+        { name: "apply_patch", namespace: "default_api", description: "patch", parameters: { type: "object" } },
+      ],
+    };
+
+    const execReq = customActionToToolRequest({ tool: "codex_exec", command: "echo 1" }, env);
+    expect(execReq.wireName).toBe("default_api__exec_command");
+    expect(execReq.arguments).toEqual({ cmd: "echo 1" });
+
+    const patchReq = customActionToToolRequest({ tool: "codex_apply_patch", patch: "*** Begin Patch" }, env);
+    expect(patchReq.wireName).toBe("default_api__apply_patch");
+  });
+});

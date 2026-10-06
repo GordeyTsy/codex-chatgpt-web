@@ -9,6 +9,7 @@ import {
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { chatGptToolTimeoutError } from "./adapter-error";
+import { namespacedToolName } from "../../types";
 
 interface BrokerRetirementFailure {
   code: "codex_tool_timeout";
@@ -86,7 +87,7 @@ export function customActionToToolRequest(
         ?? environment?.tools?.find(t => t.name === "shell_command");
       if (tool) {
         return {
-          wireName: tool.name,
+          wireName: namespacedToolName(tool.namespace, tool.name),
           freeform: false,
           arguments: tool.name === "exec_command" ? { cmd: action.command } : { command: action.command },
         };
@@ -94,7 +95,7 @@ export function customActionToToolRequest(
       const gateway = environment?.tools?.find(t => t.name === "exec" && t.freeform);
       if (gateway) {
         return {
-          wireName: "exec",
+          wireName: namespacedToolName(gateway.namespace, gateway.name),
           freeform: true,
           input: execCommandGatewayProgram({ cmd: action.command }, { command: action.command }),
         };
@@ -104,16 +105,17 @@ export function customActionToToolRequest(
     case "codex_apply_patch": {
       const patchTool = environment?.tools?.find(t => t.name === "apply_patch");
       if (patchTool) {
+        const wire = namespacedToolName(patchTool.namespace, patchTool.name);
         if (patchTool.freeform) {
-          return { wireName: "apply_patch", freeform: true, input: action.patch };
+          return { wireName: wire, freeform: true, input: action.patch };
         }
-        return { wireName: "apply_patch", freeform: false, arguments: { patch: action.patch, input: action.patch } };
+        return { wireName: wire, freeform: false, arguments: { patch: action.patch, input: action.patch } };
       }
       const gateway = environment?.tools?.find(t => t.name === "exec" && t.freeform);
       if (gateway) {
         const patchCmd = `apply_patch <<'EOF'\n${action.patch.replace(/EOF/g, "E_O_F")}\nEOF`;
         return {
-          wireName: "exec",
+          wireName: namespacedToolName(gateway.namespace, gateway.name),
           freeform: true,
           input: execCommandGatewayProgram({ cmd: patchCmd }, { command: patchCmd }),
         };
@@ -121,8 +123,9 @@ export function customActionToToolRequest(
       return { wireName: "apply_patch", freeform: false, arguments: { patch: action.patch, input: action.patch } };
     }
     case "codex_write_stdin": {
+      const stdinTool = environment?.tools?.find(t => t.name === "write_stdin");
       return {
-        wireName: "write_stdin",
+        wireName: stdinTool ? namespacedToolName(stdinTool.namespace, stdinTool.name) : "write_stdin",
         freeform: false,
         arguments: {
           session_id: action.sessionId,
@@ -133,8 +136,9 @@ export function customActionToToolRequest(
       };
     }
     case "codex_view_image": {
+      const viewTool = environment?.tools?.find(t => t.name === "view_image");
       return {
-        wireName: "view_image",
+        wireName: viewTool ? namespacedToolName(viewTool.namespace, viewTool.name) : "view_image",
         freeform: false,
         arguments: {
           path: action.path,
@@ -143,8 +147,12 @@ export function customActionToToolRequest(
       };
     }
     case "codex_tool_call": {
+      const matched = environment?.tools?.find(t =>
+        namespacedToolName(t.namespace, t.name) === action.wireName || t.name === action.wireName,
+      );
+      const wire = matched ? namespacedToolName(matched.namespace, matched.name) : action.wireName;
       return {
-        wireName: action.wireName,
+        wireName: wire,
         freeform: action.input !== undefined,
         ...(action.arguments ? { arguments: action.arguments } : {}),
         ...(action.input !== undefined ? { input: action.input } : {}),
@@ -153,7 +161,7 @@ export function customActionToToolRequest(
     case "codex_tool_inventory": {
       const searchTool = environment?.tools?.find(t => t.name === "tool_search" || t.name === "search_tools");
       return {
-        wireName: searchTool ? searchTool.name : "tool_search",
+        wireName: searchTool ? namespacedToolName(searchTool.namespace, searchTool.name) : "tool_search",
         freeform: false,
         arguments: { query: action.query ?? "" },
       };
@@ -171,6 +179,7 @@ export interface BrokerToolRequest {
   freeform: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
+  direct?: boolean;
 }
 
 export interface BrokerToolResult {
@@ -813,6 +822,7 @@ export class TurnBroker implements TurnBrokerOwner {
       callId,
       wireName: req.wireName,
       freeform: req.freeform,
+      direct: true,
       ...(req.arguments ? { arguments: req.arguments } : {}),
       ...(req.input ? { input: req.input } : {}),
     };

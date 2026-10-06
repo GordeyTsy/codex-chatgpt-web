@@ -330,11 +330,16 @@ function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSess
 }
 
 function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequest[]): void {
-  const available = new Set((parsed.context.tools ?? []).map(tool => namespacedToolName(tool.namespace, tool.name)));
+  const tools = parsed.context.tools ?? [];
+  const available = new Set(tools.map(tool => namespacedToolName(tool.namespace, tool.name)));
   for (const request of requests) {
-    if (!available.has(request.wireName)) {
-      throw new Error(`ChatGPT requested a tool that the active Codex round did not advertise: ${request.wireName}`);
+    if (available.has(request.wireName)) continue;
+    const matched = tools.find(tool => tool.name === request.wireName);
+    if (matched) {
+      request.wireName = namespacedToolName(matched.namespace, matched.name);
+      continue;
     }
+    throw new Error(`ChatGPT requested a tool that the active Codex round did not advertise: ${request.wireName}`);
   }
 }
 
@@ -515,7 +520,7 @@ export function createChatGptWebAdapter(
         let emptyRecoveries = 0;
         for (let attempt = 0; ; attempt++) {
           if (browserAbort.signal.aborted) throw browserAbort.signal.reason;
-          safetyRecoveryTriggered = false;
+          if (attempt === 0) safetyRecoveryTriggered = false;
           modelProgress = new ChatGptModelProgressWatchdog(progressTimeoutMs);
           const attemptAbort = new AbortController();
           const prefix = text.value();
@@ -591,8 +596,9 @@ export function createChatGptWebAdapter(
             // Keep its capability alive and await native result delivery before
             // compiling another conversation, including after owner login.
             let pending = progress?.snapshot();
-            while (pending && pending.activeToolCalls > 0) {
+            while (pending && (pending.activeToolCalls > 0 || safetyRecoveryTriggered)) {
               pending = await progress!.waitForChange(pending.revision, browserAbort.signal);
+              if (pending.activeToolCalls === 0 && !safetyRecoveryTriggered) break;
             }
             browserAbort.signal.throwIfAborted();
             console.info(`[chatgpt-web] model_progress_recovery trace=${traceId} nextAttempt=${attempt + 1} emptyRecoveries=${emptyRecoveries}`);
@@ -860,6 +866,7 @@ export function createChatGptWebAdapter(
         usageInput: checkpointInput.parsed,
         updateRecoveryInput: input => { recoveryInput = input; },
       isSafetyRecovery: () => safetyRecoveryTriggered,
+        clearSafetyRecovery: () => { safetyRecoveryTriggered = false; },
         submission,
         cancel: browserTurn.cancel,
       };
@@ -910,15 +917,15 @@ export function createChatGptWebAdapter(
         retryable: true,
       });
 
-      // 1. Cancel active browser attempt
-      currentAttemptCancel?.(recoveryError);
-
-      // 2. Clear any pending custom action on the broker
+      // 1. Clear any pending custom action on the broker
       const turnToken = activeToken ?? await token.promise;
       await Promise.resolve(broker.clearPendingCustomAction(turnToken)).catch(() => {});
 
-      // 3. Queue direct action on broker
+      // 2. Queue direct action on broker FIRST so externalProgress receives it
       await broker.queueDirectAction(turnToken, action);
+
+      // 3. Cancel active browser attempt
+      currentAttemptCancel?.(recoveryError);
     };
 
     const fallbackDetector = new SafetyFallbackStreamDetector((action, reason) => {
@@ -1020,6 +1027,8 @@ export function createChatGptWebAdapter(
       text,
       usageInput: checkpointInput.parsed,
       updateRecoveryInput: input => { recoveryInput = input; },
+      isSafetyRecovery: () => safetyRecoveryTriggered,
+      clearSafetyRecovery: () => { safetyRecoveryTriggered = false; },
       ...(conversationKey ? { conversationKey } : {}),
       ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
       retireCapability: async () => {
@@ -1513,6 +1522,7 @@ export function createChatGptWebAdapter(
                   session.runtime.externalProgress.recordToolResult();
                   session.markResultDelivered(message.toolCallId);
                 }
+                session.runtime.clearSafetyRecovery?.();
               }
             } else if (session.outstanding().length > 0) {
               throw new Error("Read-only ChatGPT Web runtime cannot own local tool calls");
@@ -1544,7 +1554,10 @@ export function createChatGptWebAdapter(
                   }
                   if (requests.length > 0) {
                     const revision = externalProgress.recordToolBatch(requests.length);
-                    if (!session.runtime.manualControl && !session.runtime.isSafetyRecovery?.()) {
+                    const isDirectAction = requests.some(r => r.direct);
+                    if (isDirectAction || session.runtime.isSafetyRecovery?.()) {
+                      await externalProgress.acknowledgeToolBatch(revision);
+                    } else if (!session.runtime.manualControl) {
                       // The browser outcome is in the same race below and owns the semantic DOM and
                       // renderer deadlines. A second fixed timer here can retire an accepted turn
                       // while its same-tab observer is still recovering. Keep the causal barrier —
@@ -1578,6 +1591,7 @@ export function createChatGptWebAdapter(
                       buffer,
                     ));
                     session.completeRound(roundKey);
+                    chatGptTurnSessions.retire(executionKey, session);
                     return;
                   }
                 }
@@ -1595,6 +1609,7 @@ export function createChatGptWebAdapter(
                       buffer,
                     ));
                     session.completeRound(roundKey);
+                    chatGptTurnSessions.retire(executionKey, session);
                     return;
                   }
                 }
