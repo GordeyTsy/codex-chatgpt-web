@@ -200,3 +200,19 @@ describe("turn broker safety recovery methods", () => {
     }
   });
 });
+
+  test("parses markdown-escaped tags and unescaped inner quotes produced by ChatGPT", () => {
+    const rawChatGPTOutput = `<<<CODEX\\_SAFETY\\_FALLBACK>\\>>  
+{"failed\\_tool": "codex\\_exec", "command": "python3 -c "open('/tmp/test\\_fallback\\_result.txt', 'w').write('FALLBACK\\_WORKS')""}  
+<<<END\\_CODEX\\_SAFETY\\_FALLBACK>\\>>`;
+
+    const parsed = parseSafetyFallbackBlock(rawChatGPTOutput);
+    expect(parsed).toBeDefined();
+    expect(parsed?.action).toEqual({
+      tool: "codex_exec",
+      command: "python3 -c \"open('/tmp/test_fallback_result.txt', 'w').write('FALLBACK_WORKS')\"",
+    });
+
+    const stripped = stripSafetyFallback(rawChatGPTOutput);
+    expect(stripped).toBe("");
+  });

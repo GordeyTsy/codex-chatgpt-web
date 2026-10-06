@@ -5,18 +5,36 @@ export const SAFETY_FALLBACK_END_TAG = "<<<END_CODEX_SAFETY_FALLBACK>>>";
 export const ALT_SAFETY_FALLBACK_START_TAG = "[CODEX_SAFETY_FALLBACK]";
 export const ALT_SAFETY_FALLBACK_END_TAG = "[/CODEX_SAFETY_FALLBACK]";
 
-const FALLBACK_START_PATTERN = /(?:<<<CODEX_SAFETY_FALLBACK>>>|\[CODEX_SAFETY_FALLBACK\])/i;
-const FALLBACK_END_PATTERN = /(?:<<<END_CODEX_SAFETY_FALLBACK>>>|\[\/CODEX_SAFETY_FALLBACK\])/i;
+const FALLBACK_START_PATTERN = /(?:<<<CODEX_SAFETY_FALLBACK>+>|\[CODEX_SAFETY_FALLBACK\])/i;
+const FALLBACK_END_PATTERN = /(?:<<<END_CODEX_SAFETY_FALLBACK>+>|\[\/CODEX_SAFETY_FALLBACK\])/i;
 const FALLBACK_PREFIX_PATTERN = /(?:<<<CODEX_SAFETY_FALLBACK|\[CODEX_SAFETY_FALLBACK)/i;
 
+export function normalizeMarkdownEscapes(text: string): string {
+  return text.replace(/\\([_><*~`\\])/g, "$1");
+}
+
 export function hasSafetyFallbackMarker(text: string): boolean {
-  return FALLBACK_PREFIX_PATTERN.test(text);
+  return FALLBACK_PREFIX_PATTERN.test(text) || FALLBACK_PREFIX_PATTERN.test(normalizeMarkdownEscapes(text));
 }
 
 export function stripSafetyFallback(text: string): string {
-  const match = FALLBACK_PREFIX_PATTERN.exec(text);
-  if (!match) return text;
-  return text.slice(0, match.index).trimEnd();
+  const norm = normalizeMarkdownEscapes(text);
+  const matchNorm = FALLBACK_PREFIX_PATTERN.exec(norm);
+  const matchRaw = FALLBACK_PREFIX_PATTERN.exec(text);
+
+  let cutIndex = -1;
+  if (matchRaw) {
+    cutIndex = matchRaw.index;
+  } else if (matchNorm) {
+    // Search for unescaped or escaped prefix in raw text
+    const escapedPrefixMatch = /(?:<<<CODEX\\?_SAFETY\\?_FALLBACK|\[CODEX\\?_SAFETY\\?_FALLBACK)/i.exec(text);
+    cutIndex = escapedPrefixMatch ? escapedPrefixMatch.index : matchNorm.index;
+  }
+
+  if (cutIndex >= 0) {
+    return text.slice(0, cutIndex).trimEnd();
+  }
+  return text;
 }
 
 export function customActionFromFallbackPayload(
@@ -89,10 +107,11 @@ export function customActionFromFallbackPayload(
 }
 
 export function parseSafetyFallbackBlock(text: string): { action: CustomAction; rawBlock: string } | undefined {
-  const match = FALLBACK_START_PATTERN.exec(text);
+  const normalized = normalizeMarkdownEscapes(text);
+  const match = FALLBACK_START_PATTERN.exec(normalized);
   if (!match) return undefined;
 
-  const afterStart = text.slice(match.index + match[0].length);
+  const afterStart = normalized.slice(match.index + match[0].length);
   const endMatch = FALLBACK_END_PATTERN.exec(afterStart);
 
   let jsonStr = "";
@@ -100,7 +119,7 @@ export function parseSafetyFallbackBlock(text: string): { action: CustomAction; 
 
   if (endMatch) {
     jsonStr = afterStart.slice(0, endMatch.index).trim();
-    rawBlock = text.slice(match.index, match.index + match[0].length + endMatch.index + endMatch[0].length);
+    rawBlock = normalized.slice(match.index, match.index + match[0].length + endMatch.index + endMatch[0].length);
   } else {
     // End tag has not appeared yet, attempt to find balanced JSON object {...}
     const firstBrace = afterStart.indexOf("{");
@@ -108,29 +127,53 @@ export function parseSafetyFallbackBlock(text: string): { action: CustomAction; 
     const lastBrace = afterStart.lastIndexOf("}");
     if (lastBrace === -1 || lastBrace <= firstBrace) return undefined;
     jsonStr = afterStart.slice(firstBrace, lastBrace + 1).trim();
-    rawBlock = text.slice(match.index, match.index + match[0].length + lastBrace + 1);
+    rawBlock = normalized.slice(match.index, match.index + match[0].length + lastBrace + 1);
   }
 
   // Strip markdown code fences if wrapped in ```json ... ```
   jsonStr = jsonStr.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 
+  let parsed: Record<string, unknown> | undefined;
   try {
-    const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-
-    const failedTool = typeof parsed.failed_tool === "string" ? parsed.failed_tool : "codex_exec";
-    const command = typeof parsed.command === "string" ? parsed.command : undefined;
-    const argSummary = typeof parsed.argument_summary === "string" ? parsed.argument_summary : undefined;
-    const rawArgs = parsed.arguments && typeof parsed.arguments === "object" && !Array.isArray(parsed.arguments)
-      ? parsed.arguments as Record<string, unknown>
-      : undefined;
-
-    const action = customActionFromFallbackPayload(failedTool, parsed, command, argSummary, rawArgs);
-    if (!action) return undefined;
-    return { action, rawBlock };
+    const obj = JSON.parse(jsonStr);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      parsed = obj as Record<string, unknown>;
+    }
   } catch {
-    return undefined;
+    // Relaxed fallback extraction when inner quotes in a command were not escaped by the model
+    const toolMatch = /(?:["']?failed_tool["']?|["']?tool["']?)\s*:\s*["']([^"']+)["']/i.exec(jsonStr);
+    const failedTool = toolMatch ? toolMatch[1] : "codex_exec";
+    const cmdMatch = /(?:["']?command["']?|["']?cmd["']?)\s*:\s*["']([\s\S]*)["']\s*\}\s*$/i.exec(jsonStr)
+      || /(?:["']?command["']?|["']?cmd["']?)\s*:\s*["']([\s\S]*?)["']\s*,\s*["']?[a-zA-Z_]+["']?\s*:/i.exec(jsonStr)
+      || /(?:["']?command["']?|["']?cmd["']?)\s*:\s*["']([\s\S]*?)["']\s*(?:,\s*["']|\}\s*$)/i.exec(jsonStr);
+    const patchMatch = /(?:["']?patch["']?)\s*:\s*["']([\s\S]*)["']\s*\}\s*$/i.exec(jsonStr)
+      || /(?:["']?patch["']?)\s*:\s*["']([\s\S]*?)["']\s*,\s*["']?[a-zA-Z_]+["']?\s*:/i.exec(jsonStr)
+      || /(?:["']?patch["']?)\s*:\s*["']([\s\S]*?)["']\s*(?:,\s*["']|\}\s*$)/i.exec(jsonStr);
+    const argSummaryMatch = /(?:["']?argument_summary["']?)\s*:\s*["']([\s\S]*)["']\s*\}\s*$/i.exec(jsonStr)
+      || /(?:["']?argument_summary["']?)\s*:\s*["']([\s\S]*?)["']\s*(?:,\s*["']|\}\s*$)/i.exec(jsonStr);
+
+    if (toolMatch || cmdMatch || patchMatch) {
+      parsed = {
+        failed_tool: failedTool,
+        ...(cmdMatch ? { command: cmdMatch[1] } : {}),
+        ...(patchMatch ? { patch: patchMatch[1] } : {}),
+        ...(argSummaryMatch ? { argument_summary: argSummaryMatch[1] } : {}),
+      };
+    }
   }
+
+  if (!parsed) return undefined;
+
+  const failedTool = typeof parsed.failed_tool === "string" ? parsed.failed_tool : "codex_exec";
+  const command = typeof parsed.command === "string" ? parsed.command : undefined;
+  const argSummary = typeof parsed.argument_summary === "string" ? parsed.argument_summary : undefined;
+  const rawArgs = parsed.arguments && typeof parsed.arguments === "object" && !Array.isArray(parsed.arguments)
+    ? parsed.arguments as Record<string, unknown>
+    : undefined;
+
+  const action = customActionFromFallbackPayload(failedTool, parsed, command, argSummary, rawArgs);
+  if (!action) return undefined;
+  return { action, rawBlock };
 }
 
 export class SafetyFallbackStreamDetector {
