@@ -9,6 +9,7 @@ afterAll(() => rmSync(fixtureDir, { recursive: true, force: true }));
 let original: (value: string) => string;
 let optimized: (value: string) => string;
 let bundled: string;
+let dollarRender: (value: string) => string;
 beforeAll(async () => {
   const build = await Bun.build({ entrypoints: [new URL("./fixtures/autolink-render-entry.ts", import.meta.url).pathname], target: "node", minify: true });
   if (!build.success) throw new AggregateError(build.logs, "parser fixture build failed");
@@ -17,8 +18,15 @@ beforeAll(async () => {
   expect(patched.patched).toBeTrue();
   writeFileSync(join(fixtureDir, "original.mjs"), bundled);
   writeFileSync(join(fixtureDir, "optimized.mjs"), patched.source);
+  const guard = /\|\|(\w+)\(\w+\.events\)/.exec(bundled);
+  if (!guard) throw new Error("parser fixture email guard missing");
+  const renamed = bundled.replace(new RegExp(`\\b${guard[1]}\\b`, "g"), () => "$history");
+  // Bun 1.4.0 on macOS fails to resolve a fixture added after the first imports.
+  // Create every fixture first, before importing any of them.
+  writeFileSync(join(fixtureDir, "dollar.mjs"), patchAutolinkEmailCheck(renamed).source);
   original = (await import(join(fixtureDir, "original.mjs"))).render;
   optimized = (await import(join(fixtureDir, "optimized.mjs"))).render;
+  dollarRender = (await import(join(fixtureDir, "dollar.mjs"))).render;
 });
 
 test("does not rewrite unknown or already-patched bundles", () => {
@@ -60,10 +68,8 @@ test("recognizes dollar identifiers used by current site minification", async ()
   const patched = patchAutolinkEmailCheck(renamed);
   expect(patched.patched).toBeTrue();
   expect(patchAutolinkEmailCheck(patched.source).patched).toBeFalse();
-  writeFileSync(join(fixtureDir, "dollar.mjs"), patched.source);
-  const render = (await import(join(fixtureDir, "dollar.mjs"))).render;
   for (const value of ["hello@example.com", "[word **bold** ".repeat(100), "Кириллица 😀 [a@b.test](https://example.invalid)"]) {
-    expect(render(value)).toBe(original(value));
+    expect(dollarRender(value)).toBe(original(value));
   }
 });
 
