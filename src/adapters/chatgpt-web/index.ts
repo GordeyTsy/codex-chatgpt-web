@@ -492,6 +492,7 @@ export function createChatGptWebAdapter(
     let modelProgress = new ChatGptModelProgressWatchdog(progressTimeoutMs);
     let recoveryInput = checkpointInput.parsed;
     let quotaFallback = false;
+    let safetyRecoveryTriggered = false;
     const fallbackAllowed = parsed._chatgptModelFamily === "6" && parsed.options.reasoning === "max"
       && !!identity.threadId && turnCapabilities.extraHighAvailable
       && provider.chatgptWeb?.proQuotaFallbackThreadIds?.includes(identity.threadId) === true;
@@ -897,7 +898,6 @@ export function createChatGptWebAdapter(
       }
     };
     prepareRecovery = () => prepareWith(savedRecoveryInput());
-    let safetyRecoveryTriggered = false;
     const triggerSafetyRecovery = async (action: CustomAction, reason: string): Promise<void> => {
       if (safetyRecoveryTriggered) return;
       safetyRecoveryTriggered = true;
