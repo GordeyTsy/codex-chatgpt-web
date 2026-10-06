@@ -938,6 +938,9 @@ export function createChatGptWebAdapter(
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
+      onSafetyFallback: action => {
+        void triggerSafetyRecovery(action, "browser_visible_fallback");
+      },
       onReasoningSummary: (textDelta, continuation) => {
         const { cleanChunk } = fallbackDetector.observe(textDelta);
         if (cleanChunk) {

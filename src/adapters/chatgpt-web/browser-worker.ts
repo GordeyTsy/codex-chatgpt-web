@@ -4,6 +4,8 @@ import { ChatGptMessageDeliveryRecovery } from "./message-delivery-recovery";
 import { captureChatGptTimeoutPage } from "./timeout-page-snapshot";
 import { DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS } from "./model-progress-watchdog";
 import { assertChatGptBindingCompletion, ChatGptBindingAnswerBuffer } from "./binding-failure";
+import { hasSafetyFallbackMarker, parseSafetyFallbackBlock } from "./safety-fallback";
+import type { CustomAction } from "./turn-broker";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -1376,6 +1378,7 @@ export interface BrowserTurn {
   /** Require and remove the private Luna checkpoint tail from the visible Markdown stream. */
   captureLunaCheckpoint?: boolean;
   onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
+  onSafetyFallback?: (action: CustomAction) => void;
 }
 
 interface ChatGptSubmissionBaseline {
@@ -5696,6 +5699,19 @@ export class ChatGptBrowserWorker {
           if (!capturedResponse) {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");
+          }
+          if (turn.onSafetyFallback && hasSafetyFallbackMarker(snapshot.visibleText)) {
+            const parsed = parseSafetyFallbackBlock(snapshot.visibleText);
+            if (parsed) {
+              console.info(`[chatgpt-web] browser-worker intercepted safety fallback in visibleText: tool=${parsed.action.tool}`);
+              turn.onSafetyFallback(parsed.action);
+              throw new ChatGptWebAdapterError("Recovering safety-blocked tool call", {
+                status: 409,
+                errorType: "invalid_request_error",
+                code: "chatgpt_safety_recovery",
+                retryable: true,
+              });
+            }
           }
           const textDelta = (() => {
             try {
