@@ -165,6 +165,7 @@ interface ChatGptTurnRuntimeBase {
   /** Present only when the visible ChatGPT tab is driven manually through the Codex Zero Risk MCP contract. */
   manualControl?: { surfaceNonce: string };
   cancel: (reason?: Error) => void;
+  isSafetyRecovery?: () => boolean;
 }
 
 export type ChatGptTurnRuntime =

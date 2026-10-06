@@ -514,6 +514,7 @@ export function createChatGptWebAdapter(
         let emptyRecoveries = 0;
         for (let attempt = 0; ; attempt++) {
           if (browserAbort.signal.aborted) throw browserAbort.signal.reason;
+          safetyRecoveryTriggered = false;
           modelProgress = new ChatGptModelProgressWatchdog(progressTimeoutMs);
           const attemptAbort = new AbortController();
           const prefix = text.value();
@@ -857,6 +858,7 @@ export function createChatGptWebAdapter(
         text,
         usageInput: checkpointInput.parsed,
         updateRecoveryInput: input => { recoveryInput = input; },
+      isSafetyRecovery: () => safetyRecoveryTriggered,
         submission,
         cancel: browserTurn.cancel,
       };
@@ -895,10 +897,10 @@ export function createChatGptWebAdapter(
       }
     };
     prepareRecovery = () => prepareWith(savedRecoveryInput());
-    let safetyRecoveryInProgress = false;
+    let safetyRecoveryTriggered = false;
     const triggerSafetyRecovery = async (action: CustomAction, reason: string): Promise<void> => {
-      if (safetyRecoveryInProgress) return;
-      safetyRecoveryInProgress = true;
+      if (safetyRecoveryTriggered) return;
+      safetyRecoveryTriggered = true;
       console.info(`[chatgpt-web] triggerSafetyRecovery trace=${traceId} reason=${reason} tool=${action.tool}`);
 
       const recoveryError = new ChatGptWebAdapterError("Recovering safety-blocked tool call", {
@@ -917,12 +919,6 @@ export function createChatGptWebAdapter(
 
       // 3. Queue direct action on broker
       await broker.queueDirectAction(turnToken, action);
-
-      // 4. Acknowledge observation immediately in externalProgress so waitForToolBatchObservation resolves
-      const snap = externalProgress.snapshot();
-      await externalProgress.acknowledgeToolBatch(snap.lastToolBatchRevision);
-
-      safetyRecoveryInProgress = false;
     };
 
     const fallbackDetector = new SafetyFallbackStreamDetector((action, reason) => {
@@ -1545,7 +1541,7 @@ export function createChatGptWebAdapter(
                   }
                   if (requests.length > 0) {
                     const revision = externalProgress.recordToolBatch(requests.length);
-                    if (!session.runtime.manualControl) {
+                    if (!session.runtime.manualControl && !session.runtime.isSafetyRecovery?.()) {
                       // The browser outcome is in the same race below and owns the semantic DOM and
                       // renderer deadlines. A second fixed timer here can retire an accepted turn
                       // while its same-tab observer is still recovering. Keep the causal barrier —
