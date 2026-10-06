@@ -28,7 +28,7 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, type CompiledCh
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy, MAX_CHATGPT_WEB_TURN_RETRIES } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type CustomAction, type TurnBrokerOwner } from "./turn-broker";
-import { SafetyFallbackStreamDetector } from "./safety-fallback";
+import { SafetyFallbackStreamDetector, hasSafetyFallbackMarker, parseSafetyFallbackBlock } from "./safety-fallback";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
@@ -1565,6 +1565,40 @@ export function createChatGptWebAdapter(
               let nextTools = armNextTools();
               const browserOutcome = session.browserOutcome.then(outcome => ({ type: "browser" as const, outcome }));
               const finishBrowserOutcome = async (completedOutcome: ChatGptBrowserOutcome): Promise<void> => {
+                if (completedOutcome.type === "final" && hasSafetyFallbackMarker(completedOutcome.answer) && turnToken) {
+                  const parsedFallback = parseSafetyFallbackBlock(completedOutcome.answer);
+                  if (parsedFallback) {
+                    console.info(`[chatgpt-web] finishBrowserOutcome intercepted safety fallback in final answer: tool=${parsedFallback.action.tool}`);
+                    const toolReq = await broker.queueDirectAction(turnToken, parsedFallback.action);
+                    validateBatchTools(parsed, [toolReq]);
+                    session.setOutstanding([toolReq], roundReasoning, session.roundEvents(roundKey));
+                    emitRoundBatch(buffer => emitToolBatch(
+                      [toolReq],
+                      estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning: roundReasoning, toolRequests: [toolReq] }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
+                      buffer,
+                    ));
+                    session.completeRound(roundKey);
+                    return;
+                  }
+                }
+                if (completedOutcome.type === "final" && turnToken) {
+                  const pending = await Promise.resolve(broker.getPendingCustomAction(turnToken));
+                  if (pending) {
+                    console.info(`[chatgpt-web] finishBrowserOutcome intercepted pending custom action: tool=${pending.action.tool}`);
+                    await Promise.resolve(broker.clearPendingCustomAction(turnToken)).catch(() => {});
+                    const toolReq = await broker.queueDirectAction(turnToken, pending.action);
+                    validateBatchTools(parsed, [toolReq]);
+                    session.setOutstanding([toolReq], roundReasoning, session.roundEvents(roundKey));
+                    emitRoundBatch(buffer => emitToolBatch(
+                      [toolReq],
+                      estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning: roundReasoning, toolRequests: [toolReq] }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
+                      buffer,
+                    ));
+                    session.completeRound(roundKey);
+                    return;
+                  }
+                }
+
                 // Zero Risk completion and its owner-only empty-batch signal are resolved by the
                 // same broker transition. Drain once more so the accepted final answer cannot be
                 // overtaken by the terminal owner notification.
