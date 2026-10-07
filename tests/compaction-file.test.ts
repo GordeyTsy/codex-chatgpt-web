@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildCompactionFile, validateCompactionFileAnswer } from "../src/adapters/chatgpt-web/compaction-file";
@@ -28,6 +29,25 @@ test("six section reads reconstruct Unicode context byte-for-byte and checks are
     expect(archive.prompt).not.toContain(section.endCheck);
   }
   expect(validateCompactionFileAnswer(JSON.stringify(response(archive)), archive.manifest)).toBe(summary);
+});
+
+test("provided native loader displays a large Unicode archive completely with the advertised bounded call count", () => {
+  const root = mkdtempSync(join(tmpdir(), "compact-loader-"));
+  try {
+    const context = JSON.stringify({ messages: ["🙂Привет\n".repeat(20_000), "latest goal and exact completed effect"] });
+    const archive = buildCompactionFile(context);
+    const path = join(root, archive.file.name);
+    writeFileSync(path, archive.file.text);
+    const program = archive.prompt.match(/```python\n([\s\S]*?)\n```/)![1]!
+      .replace("Path('/mnt/data')", `Path(${JSON.stringify(root)})`).replace(/\nread_next\(\)$/, "");
+    const displayed: string[] = JSON.parse(execFileSync("python3", ["-c", program +
+      "\nimport io, json\nfrom contextlib import redirect_stdout\noutputs=[]\nfor _ in range(len(pages)):\n    output=io.StringIO()\n    with redirect_stdout(output): read_next()\n    outputs.append(output.getvalue()[:-1])\nprint(json.dumps(outputs))"], { maxBuffer: 2_000_000 }).toString());
+    expect(displayed).toHaveLength(Number(archive.prompt.match(/exactly (\d+) bounded page reads/)![1]));
+    expect(displayed.every(page => Array.from(page).length <= 12_000)).toBeTrue();
+    expect(displayed.join("").replace(/READ_START_CHECK=[a-f0-9]+\n/g, "").replace(/\nREAD_END_CHECK=[a-f0-9]+\n/g, "")).toBe(context);
+    expect(archive.prompt).not.toContain("print(sections[");
+    expect(buildCompactionFile("short history").prompt).toContain("exactly 6 bounded page reads");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test.each(["missing", "duplicate", "foreign", "wrong-check", "empty-summary", "incomplete"])("incomplete coverage cannot become a native checkpoint: %s", variant => {

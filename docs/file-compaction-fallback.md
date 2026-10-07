@@ -19,9 +19,12 @@ One UTF-8 attachment contains the complete ordered JSON context, including skill
 in their original positions. Six Unicode-safe sections carry start/end read checks.
 The short prompt contains the archive identity but does not contain those checks.
 The fixed procedure opens that attachment, displays each section once in order,
-then immediately returns one concise checkpoint. Native Python instructions are
-provided; a native attachment reader is permitted when Python is unavailable.
-Only truncated ranges may be read again. No historical command execution, external
+then immediately returns one concise checkpoint. The loader and exact call count
+are supplied, with pages bounded to 12,000 Unicode characters before the first
+read. Large sections need several tool displays because native stdout is limited;
+the model does not invent pagination or first print an oversized section.
+Native Python instructions are provided; a native attachment reader is permitted
+when Python is unavailable. Only truncated ranges may be read again. No historical command execution, external
 search, test rerun, checksum calculation or intermediate summary is requested.
 
 The final JSON must be in a fenced code block so browser-to-Markdown conversion

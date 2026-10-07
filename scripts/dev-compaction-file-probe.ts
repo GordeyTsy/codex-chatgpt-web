@@ -38,9 +38,9 @@ const compiled = compileChatGptWebPrompt(parsed, capabilities, undefined, { file
 writeFileSync(join(output, "input-archive.txt"), compiled.contextFiles![0]!.text, { mode: 0o600 });
 const worker = ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web", baseUrl: `browser://file-probe-${randomUUID()}`,
   chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: descriptor, localToolsEnabled: false,
-    solAvailable: true, extraHighAvailable: true, proAvailable: true, browserDiagnosticsPath: join(output, "diagnostics"), turnTimeoutMs: 600_000 } });
+    solAvailable: true, extraHighAvailable: true, proAvailable: true, browserDiagnosticsPath: join(output, "diagnostics"), turnTimeoutMs: 1_800_000 } });
 const controller = new AbortController();
-const timer = setTimeout(() => controller.abort(new Error("DEV file compaction probe deadline")), 600_000);
+const timer = setTimeout(() => controller.abort(new Error("DEV file compaction probe deadline")), 1_800_000);
 const started = Date.now();
 try {
   const raw = await worker.run({ traceId: `dev_file_compact_${randomUUID().replaceAll("-", "")}`, modelId: parsed.modelId,
