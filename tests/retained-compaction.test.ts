@@ -1476,6 +1476,136 @@ test("cancel-all waits for physical settlement of a fresh compaction fallback", 
   }
 });
 
+test("fresh compaction generation uses real progress beyond the preparation deadline", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compact-progress-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web", baseUrl: `browser://compact-progress-${root}`,
+    chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true,
+      solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      turnTimeoutMs: 40, modelProgressTimeoutMs: 200 },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  let starts = 0;
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    starts++;
+    turn.onSubmitted!();
+    for (let chunk = 0; chunk < 4; chunk++) {
+      await Bun.sleep(25);
+      expect(turn.abortSignal?.aborted).toBeFalse();
+      turn.onTextDelta(`Summary chunk ${chunk}. `);
+    }
+    return "Complete context checkpoint";
+  };
+  const events: AdapterEvent[] = [];
+  try {
+    await createChatGptWebAdapter(provider).runTurn!(request(true), { headers: new Headers() },
+      event => events.push(event));
+    expect(starts).toBe(1);
+    expect(events.some(event => event.type === "error")).toBeFalse();
+    expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh compaction recovers model inactivity inside its logical turn", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compact-recovery-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web", baseUrl: `browser://compact-recovery-${root}`,
+    chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true,
+      solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      turnTimeoutMs: 40, modelProgressTimeoutMs: 60 },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  let starts = 0;
+  let firstRetired = false;
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    starts++;
+    turn.onSubmitted!();
+    if (starts === 1) {
+      return new Promise<string>((_resolve, reject) => {
+        turn.abortSignal!.addEventListener("abort", () => {
+          expect((turn.abortSignal!.reason as ChatGptWebAdapterError).code)
+            .toBe("chatgpt_model_no_progress");
+          firstRetired = true;
+          reject(turn.abortSignal!.reason);
+        }, { once: true });
+      });
+    }
+    expect(firstRetired).toBeTrue();
+    expect(turn.compaction).toBeTrue();
+    expect(turn.capabilities.localToolsEnabled).toBeFalse();
+    expect(turn.requireRetainedConversation).toBeFalse();
+    expect((await turn.prepare()).text).toContain("Original task");
+    turn.onTextDelta("Recovered complete checkpoint");
+    return "Recovered complete checkpoint";
+  };
+  const events: AdapterEvent[] = [];
+  try {
+    await createChatGptWebAdapter(provider).runTurn!(request(true), { headers: new Headers() },
+      event => events.push(event));
+    expect(starts).toBe(2);
+    expect(events.some(event => event.type === "error")).toBeFalse();
+    expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("idle fresh compaction keeps physical ownership while cleanup times out", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compact-idle-cleanup-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web", baseUrl: `browser://compact-idle-cleanup-${root}`,
+    chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true,
+      solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      turnTimeoutMs: 50, modelProgressTimeoutMs: 30 },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  let release!: () => void;
+  const physical = new Promise<void>(resolve => { release = resolve; });
+  let starts = 0;
+  let traceId = "";
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    starts++;
+    traceId = turn.traceId;
+    turn.onSubmitted!();
+    await physical;
+    return "Late cancelled response";
+  };
+  const adapter = createChatGptWebAdapter(provider);
+  const events: AdapterEvent[] = [];
+  try {
+    await adapter.runTurn!(request(true), { headers: new Headers() }, event => events.push(event));
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "compaction_handoff_timeout" });
+    await adapter.runTurn!(request(true), { headers: new Headers() }, event => events.push(event));
+    expect(starts).toBe(1);
+    let retired = false;
+    const retirement = cancelStructuredCompactionTrace(traceId, new Error("finish cleanup"))
+      .then(() => { retired = true; });
+    await Bun.sleep(10);
+    expect(retired).toBeFalse();
+    release();
+    await retirement;
+    expect(events.some(event => event.type === "done")).toBeFalse();
+  } finally {
+    release();
+    await cancelStructuredCompactionTrace(traceId, new Error("test cleanup"));
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a timed-out fresh compaction retains its owner until helper cleanup completes", async () => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-timeout-cleanup-"));
   const provider: CodexProviderConfig = {

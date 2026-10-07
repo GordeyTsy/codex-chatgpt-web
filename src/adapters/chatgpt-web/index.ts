@@ -423,7 +423,8 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: () => void; onAuthenticationWait?: (waiting: boolean) => void } = {},
+    hooks: { onCompactionProgress?: () => void; onCompactionSubmitted?: () => void;
+      onAuthenticationWait?: (waiting: boolean) => void } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -520,6 +521,7 @@ export function createChatGptWebAdapter(
         let emptyRecoveries = 0;
         for (let attempt = 0; ; attempt++) {
           if (browserAbort.signal.aborted) throw browserAbort.signal.reason;
+          hooks.onCompactionProgress?.();
           if (attempt === 0) safetyRecoveryTriggered = false;
           modelProgress = new ChatGptModelProgressWatchdog(progressTimeoutMs);
           const attemptAbort = new AbortController();
@@ -541,7 +543,11 @@ export function createChatGptWebAdapter(
             console.warn(`[chatgpt-web] model_no_progress trace=${traceId} timeoutMs=${modelProgress.timeoutMs} pendingTools=0 attempt=${attempt}`);
             turn.cancel(failure);
           }, Math.min(1_000, modelProgress.timeoutMs));
-          try { return prefix + await turn.browser; }
+          try {
+            const answer = await turn.browser;
+            hooks.onCompactionProgress?.();
+            return prefix + answer;
+          }
           catch (error) {
             clearInterval(interval);
             currentAttemptCancel = undefined;
@@ -563,6 +569,9 @@ export function createChatGptWebAdapter(
               && error.code === "chatgpt_pro_quota_exhausted"
               && ((fallbackAllowed && !quotaFallback) || parsed.options.reasoning !== "max");
             if ((!authentication && !recoverable && !quota) || browserAbort.signal.aborted) throw error;
+            // Model inactivity is handled inside this logical turn. Bound helper cleanup and
+            // the next submission separately, without racing its recovery with a compact timer.
+            hooks.onCompactionProgress?.();
             // Capture and release the old surface before taking a new lease. The MCP capability
             // and native turn remain the same; completed results stay in the latest native input.
             await turn.physicalSettlement;
@@ -649,6 +658,7 @@ export function createChatGptWebAdapter(
         if (!parsed._compactionRequest) submission.phase = "accepted";
         modelProgress.start();
         hooks.onCompactionProgress?.();
+        hooks.onCompactionSubmitted?.();
       },
     };
     const multipartProgressLifecycle = hooks.onCompactionProgress
@@ -1195,6 +1205,13 @@ export function createChatGptWebAdapter(
                       freshCompactionTraceId,
                       turnCapabilities,
                       { onCompactionProgress: armHandoffDeadline,
+                        // Once Send is accepted, the existing model-progress watchdog owns
+                        // generation. It resets on actual output and recovers a settled idle
+                        // browser from saved input. A second five-minute wall clock would
+                        // terminate both productive long summaries and that recovery path.
+                        onCompactionSubmitted: () => {
+                          if (handoffTimer) clearTimeout(handoffTimer);
+                        },
                         onAuthenticationWait: waiting => {
                           if (waiting) { if (handoffTimer) clearTimeout(handoffTimer); }
                           else armHandoffDeadline();

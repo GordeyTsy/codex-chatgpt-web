@@ -32,6 +32,18 @@ It keeps the same native turn and tool capability. This is not a successful
 completion until the actual task finishes. Zero Risk and non-launcher saved
 sessions keep their explicit manual-authentication requirements.
 
+## Compaction generation
+
+Fresh context compaction has separate preparation and helper-settlement deadlines.
+After the compact prompt is accepted, the model-progress watchdog owns generation:
+visible answer, commentary and reasoning progress reset its inactivity clock. An
+idle generation is retired and rebuilt from the same saved native history within
+the logical compact request, without granting tools or repeating completed effects.
+The preparation deadline resumes for helper cleanup and the next submission.
+A second fixed wall clock must not interrupt productive generation or its recovery.
+Consecutive attempts without real progress remain bounded; operator cancellation,
+authentication and physical browser ownership retain their existing rules.
+
 ## Fallback diagnosis
 
 If an unknown internal fault still terminates the native turn, the managed
