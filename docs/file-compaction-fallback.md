@@ -44,13 +44,15 @@ reads and checkpoint quality require live verification.
 ## Development probe
 
 Use an explicitly selected authenticated Launcher descriptor. This source-level
-probe leases its own temporary browser surface, requests GPT-6 Pro/max, and uses
+probe leases its own temporary browser surface, defaults to GPT-5.6 Sol/Extra High, and uses
 inert synthetic task history. It does not edit Codex routing or launch a coordinator.
+GPT-6 Pro/max requires the explicit `--model pro` option.
 
 ```bash
 bun run scripts/dev-compaction-file-probe.ts \
   --launcher-descriptor "$CODEX_CHATGPT_WEB_HOME/runtime/launcher-browser.json" \
   --output-dir /private/probe-output \
+  --model sol \
   --padding-chars 900000
 ```
 

@@ -10,7 +10,7 @@ import type { CodexParsedRequest } from "../src/types";
 const args = process.argv.slice(2);
 const arg = (name: string) => args[args.indexOf(name) + 1];
 if (!args.includes("--launcher-descriptor") || !args.includes("--output-dir")) {
-  throw new Error("Required: --launcher-descriptor PATH --output-dir PRIVATE_DIR [--padding-chars N]");
+  throw new Error("Required: --launcher-descriptor PATH --output-dir PRIVATE_DIR [--padding-chars N] [--model sol|pro]");
 }
 process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS = "1";
 const descriptor = resolve(arg("--launcher-descriptor")!);
@@ -18,6 +18,10 @@ const output = resolve(arg("--output-dir")!);
 mkdirSync(output, { recursive: true, mode: 0o700 });
 const padding = Number(args.includes("--padding-chars") ? arg("--padding-chars") : "0");
 if (!Number.isInteger(padding) || padding < 0 || padding > 2_000_000) throw new Error("Invalid padding size");
+const model = args.includes("--model") ? arg("--model") : "sol";
+if (model !== "sol" && model !== "pro") throw new Error("Model must be sol or pro");
+const modelFamily = model === "pro" ? "6" as const : "5.6" as const;
+const reasoning = model === "pro" ? "max" as const : "xhigh" as const;
 const facts = [
   "Latest goal: implement plan; tests must use actual process integrations. Writer Orion owns A, Vega owns G; they must never write each other's scope.",
   "A worktree /synthetic/owned-a HEAD 1111111111111111111111111111111111111111. Accepted SOURCE_ONLY; live Kubernetes and cutover NOT_RUN. A PVC webhook remains OPEN.",
@@ -26,8 +30,8 @@ const facts = [
   "Finding FIX_REPLAY_92 failed its single explicit correction; ownership transferred to coordinator. Failure count 2. Reserve C; I1 awaits independent root review. Source acceptance is not production acceptance.",
   "Latest steering supersedes older limit 3: FOUR workers concurrently, excluding coordinators. Resume G implementation from preserved dirty state; independently review A next. No publication authorized.",
 ];
-const parsed: CodexParsedRequest = { modelId: "gpt-5.6-sol", _chatgptModelFamily: "6", stream: true,
-  _compactionRequest: true, options: { reasoning: "max" }, context: { systemPrompt: ["Summarize the supplied historical context faithfully."],
+const parsed: CodexParsedRequest = { modelId: "gpt-5.6-sol", _chatgptModelFamily: modelFamily, stream: true,
+  _compactionRequest: true, options: { reasoning }, context: { systemPrompt: ["Summarize the supplied historical context faithfully."],
     messages: facts.flatMap((fact, i) => [
       { role: "user" as const, timestamp: i * 2 + 1, content: fact },
       { role: "assistant" as const, timestamp: i * 2 + 2, content: [{ type: "text" as const,
@@ -44,7 +48,7 @@ const timer = setTimeout(() => controller.abort(new Error("DEV file compaction p
 const started = Date.now();
 try {
   const raw = await worker.run({ traceId: `dev_file_compact_${randomUUID().replaceAll("-", "")}`, modelId: parsed.modelId,
-    modelFamily: "6", reasoning: "max", capabilities, compaction: true, abortSignal: controller.signal,
+    modelFamily, reasoning, capabilities, compaction: true, abortSignal: controller.signal,
     prepare: async () => ({ ...compiled, release() {} }), onTextDelta() {},
     onReasoningSummary: text => console.log(JSON.stringify({ event: "visible_progress", text: text.slice(0, 180) })),
   });
@@ -54,7 +58,7 @@ try {
   const required = ["Orion", "Vega", "/synthetic/owned-a", "/synthetic/owned-g", "1111111111111111111111111111111111111111",
     "2222222222222222222222222222222222222222", "DELIVERY_CASE_83", "PROCESS_REPLAY_27", "FIX_REPLAY_92", "7/7", "159/159"];
   const missing = required.filter(fact => !summary.includes(fact));
-  const result = { coverage: "6/6", elapsedMs: Date.now() - started, archiveBytes: Buffer.byteLength(compiled.contextFiles![0]!.text),
+  const result = { model, reasoning, coverage: "6/6", elapsedMs: Date.now() - started, archiveBytes: Buffer.byteLength(compiled.contextFiles![0]!.text),
     summaryChars: summary.length, missing, semanticReviewRequired: true };
   writeFileSync(join(output, "result.json"), JSON.stringify(result, null, 2), { mode: 0o600 });
   console.log(JSON.stringify(result));
