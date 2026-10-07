@@ -5,6 +5,7 @@ import { MAX_CHATGPT_WEB_TURN_RETRIES } from "./retry-policy";
 
 const RECOVERY_SETTLE_MS = 20_000;
 const TOOL_SETTLE_MS = 90_000;
+export type ChatGptDeliveryRetryState = "waiting" | "started" | "submitted" | "failed";
 
 function deliveryTimeoutError(detail: string, cause?: unknown): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
@@ -41,9 +42,11 @@ export class ChatGptMessageDeliveryRecovery {
   private waitingSince?: number;
   private failed?: ChatGptWebAdapterError;
 
-  private wait(now: number): "waiting" {
+  private wait(now: number, onRetryState?: (state: ChatGptDeliveryRetryState) => void): "waiting" {
+    if (this.waitingSince === undefined) onRetryState?.("waiting");
     this.waitingSince ??= now;
     if (now - this.waitingSince >= TOOL_SETTLE_MS) {
+      onRetryState?.("failed");
       throw deliveryTimeoutError("The pending generation, tool result or Retry action did not settle; reconcile it before continuing.");
     }
     return "waiting";
@@ -53,12 +56,19 @@ export class ChatGptMessageDeliveryRecovery {
     signal?: AbortSignal;
     toolCallsInFlight?: boolean;
     now?: number;
+    onRetryState?: (state: ChatGptDeliveryRetryState) => void;
   } = {}): Promise<"none" | "waiting" | "recovered"> {
     checkAbort(options.signal);
     if (this.failed) throw this.failed;
     const alert = scope.locator('aside[role="alert"]')
       .filter({ hasText: /Message delivery timed out\.\s*Please try again\./i }).last();
     if (!await rendered(alert)) {
+      if (this.waitingSince !== undefined) {
+        // A manual Retry can dismiss the observed card between polls. Only renewed
+        // generation on this physical page confirms that transition.
+        const running = await rendered(scope.page().locator(CHATGPT_STOP_BUTTON_SELECTOR).last());
+        options.onRetryState?.(running ? "submitted" : "failed");
+      }
       this.waitingSince = undefined;
       return "none";
     }
@@ -77,19 +87,26 @@ export class ChatGptMessageDeliveryRecovery {
     if (!current) return "none";
     const running = await rendered(scope.page().locator(CHATGPT_STOP_BUTTON_SELECTOR).last());
     if (running || options.toolCallsInFlight) {
-      return this.wait(options.now ?? Date.now());
+      return this.wait(options.now ?? Date.now(), options.onRetryState);
     }
     if (this.attempts >= MAX_CHATGPT_WEB_TURN_RETRIES) {
       throw deliveryTimeoutError("The bounded bridge recovery attempts are exhausted; continue only unfinished work.");
     }
     const retry = alert.getByRole("button", { name: "Retry", exact: true });
+    if (await retry.count() === 0) {
+      // The error text can mount before its Retry control during React hydration.
+      // Keep the current exchange until the bounded UI-settlement deadline.
+      return this.wait(options.now ?? Date.now(), options.onRetryState);
+    }
     if (await retry.count() !== 1 || !await rendered(retry)) {
       throw deliveryTimeoutError("The current card has no unambiguous delivery Retry action.");
     }
-    if (await retry.isDisabled()) return this.wait(options.now ?? Date.now());
+    if (await retry.isDisabled()) return this.wait(options.now ?? Date.now(), options.onRetryState);
     this.waitingSince = undefined;
     checkAbort(options.signal);
     this.attempts += 1; // Reserve before activating an action whose result could be uncertain.
+    let accepted = false;
+    options.onRetryState?.("started");
     try {
       await retry.press("Enter", { timeout: 5_000 });
       const deadline = Date.now() + RECOVERY_SETTLE_MS;
@@ -98,10 +115,13 @@ export class ChatGptMessageDeliveryRecovery {
         if (Date.now() >= deadline) throw new Error("Delivery Retry did not dismiss the current error card");
         await new Promise(resolve => setTimeout(resolve, 100));
       }
+      accepted = true;
     } catch (error) {
       if (options.signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       this.failed = deliveryTimeoutError("Delivery Retry could not be confirmed; reconcile before retrying.", error);
       throw this.failed;
+    } finally {
+      options.onRetryState?.(accepted ? "submitted" : "failed");
     }
     console.info(`[chatgpt-web] message delivery recovery attempt=${this.attempts}`);
     return "recovered";

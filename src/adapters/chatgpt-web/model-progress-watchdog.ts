@@ -7,6 +7,7 @@ export const DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS = 5 * 60_000;
 export class ChatGptModelProgressWatchdog {
   private lastProgressAt?: number;
   private outputs = 0;
+  private deliveryRetryUntil?: number;
 
   get outputCount(): number { return this.outputs; }
 
@@ -21,6 +22,23 @@ export class ChatGptModelProgressWatchdog {
     this.lastProgressAt ??= now;
   }
 
+  /** A bounded UI action is in flight; it is not model output or command progress. */
+  waitForDeliveryRetry(now = Date.now()): void {
+    // Error-card hydration (90s) plus activation/confirmation (25s), with IPC headroom.
+    // Repeated observations must not extend this UI-only deadline.
+    this.deliveryRetryUntil ??= now + 120_000;
+  }
+
+  beginDeliveryRetry(now = Date.now()): void {
+    this.deliveryRetryUntil ??= now + 30_000;
+  }
+
+  endDeliveryRetry(accepted: boolean, now = Date.now()): void {
+    const retryStarted = this.deliveryRetryUntil !== undefined;
+    this.deliveryRetryUntil = undefined;
+    if (accepted && retryStarted && this.lastProgressAt !== undefined) this.lastProgressAt = now;
+  }
+
   recordOutput(delta: string, now = Date.now()): void {
     if (this.lastProgressAt !== undefined && delta.length > 0) {
       this.outputs++;
@@ -30,6 +48,7 @@ export class ChatGptModelProgressWatchdog {
 
   inactivityMs(progress?: ChatGptExternalTurnProgressSnapshot, now = Date.now()): number | undefined {
     if (this.lastProgressAt === undefined) return undefined;
+    if (this.deliveryRetryUntil !== undefined && now < this.deliveryRetryUntil) return undefined;
     if (progress?.lastProgressAt !== undefined) {
       // The recorder stamps actual requests/results. Repeated snapshots and
       // retirement revisions do not create a new activity timestamp.

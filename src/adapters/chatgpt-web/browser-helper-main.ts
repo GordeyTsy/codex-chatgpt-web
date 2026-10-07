@@ -294,6 +294,11 @@ async function run(message: RunMessage): Promise<void> {
         throw new Error("Browser helper could not persist ChatGPT submission evidence");
       }
     },
+    onDeliveryRetryState: state => {
+      if (!writeProtocol({ type: "event", id: message.id, event: "delivery_retry_state", state })) {
+        throw new Error("Browser helper could not persist delivery Retry lifecycle evidence");
+      }
+    },
     onMultipartStageAcknowledged: stageIndex => {
       if (!writeProtocol({ type: "event", id: message.id, event: "multipart_stage_acknowledged", stageIndex })) {
         throw new Error("Browser helper could not persist multipart acknowledgement evidence");

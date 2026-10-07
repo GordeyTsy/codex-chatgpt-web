@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { ChatGptMessageDeliveryRecovery } from "../src/adapters/chatgpt-web/message-delivery-recovery";
 import { ChatGptBrowserWorker, throwIfChatGptSessionFailureAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptModelProgressWatchdog } from "../src/adapters/chatgpt-web/model-progress-watchdog";
 
 const executablePath = process.env.CHATGPT_DOM_TEST_BROWSER;
 const domTest = (name: string, run: () => Promise<void>, timeout = 15_000) =>
@@ -134,11 +135,102 @@ domTest("missing or ambiguous Retry is an explicit error, never response regener
         if (scenario === "missing") element.textContent = "Regenerate";
         else element.insertAdjacentHTML("afterend", '<button type="button">Retry</button>');
       }, scenario);
-      expect(await new ChatGptMessageDeliveryRecovery().recover(page.locator('[data-turn-key="current"]')).catch(error => error))
+      const recovery = new ChatGptMessageDeliveryRecovery();
+      if (scenario === "missing") {
+        expect(await recovery.recover(page.locator('[data-turn-key="current"]'), { now: 1 })).toBe("waiting");
+        expect(await recovery.recover(page.locator('[data-turn-key="current"]'), { now: 90_001 }).catch(error => error))
+          .toMatchObject({ code: "chatgpt_message_delivery_timeout" });
+      } else expect(await recovery.recover(page.locator('[data-turn-key="current"]')).catch(error => error))
         .toMatchObject({ message: expect.stringContaining("no unambiguous delivery Retry action") });
       expect(await page.evaluate(() => (window as any).deliveryRetryCount)).toBe(0);
     });
   }
+});
+
+domTest("a delivery card may mount before Retry without rebuilding the exchange", async () => {
+  await withPage(async page => {
+    const scope = page.locator('[data-turn-key="current"]');
+    const recovery = new ChatGptMessageDeliveryRecovery();
+    await page.locator("aside button").evaluate(button => button.remove());
+    expect(await recovery.recover(scope, { now: 1 })).toBe("waiting");
+    await page.locator("aside").evaluate(card => card.insertAdjacentHTML("beforeend", '<button type="button">Retry</button>'));
+    await acceptRetry(page);
+    expect(await recovery.recover(scope, { now: 2 })).toBe("recovered");
+    expect(await page.evaluate(() => (window as any).deliveryRetryCount)).toBe(1);
+    expect(await scope.count()).toBe(1);
+  });
+});
+
+domTest("a near-deadline Retry is not cancelled by the previous model-silence clock", async () => {
+  await withPage(async page => {
+    const watchdog = new ChatGptModelProgressWatchdog();
+    watchdog.start(Date.now() - 299_800);
+    await page.locator("aside button").evaluate(button => button.addEventListener("click", () => {
+      setTimeout(() => button.closest("aside")!.remove(), 400);
+    }));
+    const states: string[] = [];
+    const pending = new ChatGptMessageDeliveryRecovery().recover(page.locator('[data-turn-key="current"]'), {
+      onRetryState: state => {
+        states.push(state);
+        if (state === "started") watchdog.beginDeliveryRetry();
+        else watchdog.endDeliveryRetry(state === "submitted");
+      },
+    });
+    await page.waitForFunction(() => (window as any).deliveryRetryCount === 1);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    expect(watchdog.failure()).toBeUndefined();
+    expect(await pending).toBe("recovered");
+    expect(states).toEqual(["started", "submitted"]);
+    expect(watchdog.failure()).toBeUndefined();
+    expect(watchdog.outputCount).toBe(0);
+  });
+});
+
+domTest("Retry before the first assistant waits for hydration and preserves the accepted exchange", async () => {
+  await withPage(async page => {
+    await page.setContent('<main></main>');
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { modelProgressTimeoutMs: 300_000 },
+    }) as any;
+    const baseline = await worker.captureSubmissionBaseline(page, "Summarize saved context.");
+    await page.locator('main').evaluate(main => {
+      main.innerHTML = '<div data-turn-key="accepted"><div data-user-message-bubble>Summarize saved context.</div>'
+        + '<aside role="alert"><div>Message delivery timed out. Please try again.</div></aside></div>';
+      setTimeout(() => {
+        const card = document.querySelector('aside')!;
+        const button = document.createElement('button'); button.textContent = 'Retry';
+        button.addEventListener('click', () => {
+          (window as any).deliveryRetryCount++;
+          card.remove();
+          document.querySelector('main')!.insertAdjacentHTML('beforeend', '<button data-testid="stop-button">Stop</button>');
+          setTimeout(() => document.querySelector('[data-turn-key="accepted"]')!.insertAdjacentHTML('beforeend',
+            '<div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message">Actual summary.</div>'), 600);
+        });
+        card.append(button);
+      }, 400);
+    });
+    expect(await worker.currentSubmissionEvidence(page, baseline)).toBe("user_turn");
+    const watchdog = new ChatGptModelProgressWatchdog(); watchdog.start(Date.now() - 299_800);
+    const states: string[] = [];
+    const pending = worker.waitForNewAssistantTurn(page, baseline, undefined, undefined, undefined, 100, undefined, undefined, {
+      recovery: new ChatGptMessageDeliveryRecovery(),
+      onRetryState: (state: string) => {
+        states.push(state);
+        if (state === "waiting") watchdog.waitForDeliveryRetry();
+        else if (state === "started") watchdog.beginDeliveryRetry();
+        else watchdog.endDeliveryRetry(state === "submitted");
+      },
+    });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(watchdog.failure()).toBeUndefined();
+    const binding = await pending;
+    expect(binding.identity).toBe("group:assistant:accepted");
+    expect(states).toEqual(["waiting", "started", "submitted"]);
+    expect(await page.evaluate(() => (window as any).deliveryRetryCount)).toBe(1);
+    expect(watchdog.failure()).toBeUndefined();
+    expect(watchdog.outputCount).toBe(0);
+    expect(await page.locator('[data-turn-key]').count()).toBe(1);
+  });
 });
 
 domTest("cancellation before or during recovery never sends an extra Retry", async () => {

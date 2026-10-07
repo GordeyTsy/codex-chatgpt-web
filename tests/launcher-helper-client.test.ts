@@ -39,6 +39,11 @@ test.each([0, 73])("daemon streams browser lifecycle through the real helper pro
       }
       await turn.onSendActivated();
       turn.onSubmitted();
+      turn.onDeliveryRetryState?.("waiting");
+      turn.onDeliveryRetryState?.("started");
+      turn.onDeliveryRetryState?.("submitted");
+      turn.onDeliveryRetryState?.("started");
+      turn.onDeliveryRetryState?.("failed");
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
       turn.onTextDelta("done");
@@ -94,6 +99,7 @@ test.each([0, 73])("daemon streams browser lifecycle through the real helper pro
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
   const acknowledgedStages: number[] = [];
+  const retryStates: string[] = [];
   let sendActivated = false;
   let submitted = false;
   let released = false;
@@ -124,6 +130,7 @@ test.each([0, 73])("daemon streams browser lifecycle through the real helper pro
       onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
+      onDeliveryRetryState: state => { retryStates.push(state); },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
       captureLunaCheckpoint: true,
@@ -137,6 +144,7 @@ test.each([0, 73])("daemon streams browser lifecycle through the real helper pro
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
+    expect(retryStates).toEqual(["waiting", "started", "submitted", "started", "failed"]);
     expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),

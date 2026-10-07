@@ -651,6 +651,12 @@ export function createChatGptWebAdapter(
     // A canonical compaction request is side-effect free and remains safe to rebuild after an
     // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
     const submissionLifecycle = {
+      onDeliveryRetryState: (state: "waiting" | "started" | "submitted" | "failed") => {
+        console.info(`[chatgpt-web] delivery_retry_state trace=${traceId} state=${state}`);
+        if (state === "waiting") modelProgress.waitForDeliveryRetry();
+        else if (state === "started") modelProgress.beginDeliveryRetry();
+        else modelProgress.endDeliveryRetry(state === "submitted");
+      },
       ...(!parsed._compactionRequest ? {
         onSendActivated: () => { submission.phase = "send_activated" as const; },
       } : {}),

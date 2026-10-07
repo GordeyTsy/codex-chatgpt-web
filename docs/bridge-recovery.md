@@ -52,3 +52,21 @@ agent's ordinary queue. The owner must verify a real fix and any human action
 before explicitly continuing the stopped turn. Authentication expiry cannot be
 fixed by repeated generation requests. Callback receipts, heartbeat traffic and
 an active process alone do not prove implementation or plan completion.
+
+### Delivery Retry during compaction
+
+A rendered delivery-timeout card can appear before its Retry button finishes
+mounting. The bridge waits for that control within its bounded UI settlement
+budget instead of immediately rebuilding the entire conversation. This also
+applies before any assistant node exists, using the accepted user turn's stable
+identity. Old, quoted, ambiguous and unrelated controls remain ineligible.
+
+The helper reports delivery Retry activation and confirmed submission separately.
+The model inactivity watchdog allows at most 30 seconds for this UI action, or
+120 seconds including the existing bounded Retry hydration/settlement wait. A
+confirmed Retry starts a new response-wait budget without incrementing model
+output or command-progress counters. A failed or stuck Retry does not reset the
+original silence clock. This prevents an almost-expired clock from cancelling a
+legitimate Retry while the existing bounded confirmation is still running.
+Actual response output is forwarded before diagnostic capture so a slow snapshot
+cannot conceal new generation from the watchdog.

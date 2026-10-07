@@ -1,6 +1,6 @@
 import { waitForLauncherAuthentication } from "../../launcher-browser-host";
 import { installAutolinkRenderCompatibility } from "./autolink-render-compat";
-import { ChatGptMessageDeliveryRecovery } from "./message-delivery-recovery";
+import { ChatGptMessageDeliveryRecovery, type ChatGptDeliveryRetryState } from "./message-delivery-recovery";
 import { captureChatGptTimeoutPage } from "./timeout-page-snapshot";
 import { DEFAULT_CHATGPT_MODEL_PROGRESS_TIMEOUT_MS } from "./model-progress-watchdog";
 import { assertChatGptBindingCompletion, ChatGptBindingAnswerBuffer } from "./binding-failure";
@@ -1358,6 +1358,8 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void | Promise<void>;
+  /** A delivery Retry has its own bounded activation and acceptance boundary. */
+  onDeliveryRetryState?: (state: ChatGptDeliveryRetryState) => void;
   /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
   onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
@@ -3234,6 +3236,10 @@ export class ChatGptBrowserWorker {
     graceMs: number = CHATGPT_RESPONSE_DOM_GRACE_MS,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    deliveryRecovery?: {
+      recovery: ChatGptMessageDeliveryRecovery;
+      onRetryState?: (state: ChatGptDeliveryRetryState) => void;
+    },
   ): Promise<ChatGptAssistantTurnBinding> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -3302,6 +3308,28 @@ export class ChatGptBrowserWorker {
         observationBaseline.initialTurnIdentities,
         state.responseIdentities,
       );
+      if (!identity && deliveryRecovery) {
+        const user = observationBaseline.acceptedUserIdentity;
+        // The new renderer may show a delivery error in the accepted user group before
+        // mounting any assistant. Never select a page-wide or historical Retry control.
+        if (user?.startsWith("group:user:") && state.userIdentities.includes(user)) {
+          const scope = observationPage.locator(`[data-turn-key=${JSON.stringify(user.slice("group:user:".length))}]`);
+          const result = await deliveryRecovery.recovery.recover(scope, {
+            signal,
+            toolCallsInFlight: chatGptExternalToolCallsAreInFlight(progress),
+            onRetryState: state => {
+              deliveryRecovery.onRetryState?.(state);
+              if (state === "submitted") responseDeadline = Math.min(
+                deadline ?? Number.POSITIVE_INFINITY, Date.now() + this.config.modelProgressTimeoutMs,
+              );
+            },
+          });
+          if (result !== "none") {
+            await this.waitForTurnDomOrExternalProgress(observationPage, progress?.revision ?? 0, externalProgress, signal);
+            continue;
+          }
+        }
+      }
       if (progress
         && externalProgress
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
@@ -5498,6 +5526,7 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
+      const messageDeliveryRecovery = new ChatGptMessageDeliveryRecovery();
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
@@ -5513,6 +5542,7 @@ export class ChatGptBrowserWorker {
             return recovered;
           }
           : undefined,
+        { recovery: messageDeliveryRecovery, onRetryState: turn.onDeliveryRetryState },
       );
       await diagnostics.capture(page, "send-accepted");
 
@@ -5551,7 +5581,6 @@ export class ChatGptBrowserWorker {
         });
       };
       let domHealthTracker = new ChatGptTurnDomHealthTracker();
-      const messageDeliveryRecovery = new ChatGptMessageDeliveryRecovery();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
@@ -5582,6 +5611,7 @@ export class ChatGptBrowserWorker {
         const deliveryRecovery = await messageDeliveryRecovery.recover(responseTurn.locator, {
           signal: turn.abortSignal,
           toolCallsInFlight: chatGptExternalToolCallsAreInFlight(turn.externalProgress?.snapshot()),
+          onRetryState: turn.onDeliveryRetryState,
         });
         if (deliveryRecovery !== "none") {
           if (deliveryRecovery === "recovered") {
@@ -5696,10 +5726,6 @@ export class ChatGptBrowserWorker {
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
         if (snapshot.responsePresent) {
-          if (!capturedResponse) {
-            capturedResponse = true;
-            await diagnostics.capture(page, "response-visible");
-          }
           if (turn.onSafetyFallback && hasSafetyFallbackMarker(snapshot.visibleText)) {
             const parsed = parseSafetyFallbackBlock(snapshot.visibleText);
             if (parsed) {
@@ -5725,6 +5751,11 @@ export class ChatGptBrowserWorker {
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
           if (textDelta) emitMarkdownDelta(textDelta);
+          if (!capturedResponse) {
+            capturedResponse = true;
+            // Forward actual output before a potentially slow diagnostic snapshot.
+            await diagnostics.capture(page, "response-visible");
+          }
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
             running,

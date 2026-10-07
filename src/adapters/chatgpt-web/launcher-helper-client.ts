@@ -27,6 +27,7 @@ type HelperMessage =
   | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
+  | { type: "event"; id: string; event: "delivery_retry_state"; state: "waiting" | "started" | "submitted" | "failed" }
   | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
@@ -108,6 +109,12 @@ function parseHelperMessage(line: string): HelperMessage {
     }
     const text = message.text;
     const continuation = message.continuation;
+    if (event === "delivery_retry_state") {
+      if (typeof message.state !== "string" || !["waiting", "started", "submitted", "failed"].includes(message.state)) {
+        throw new Error("Launcher browser helper delivery Retry state is invalid");
+      }
+      return { type: "event", id: message.id, event, state: message.state as "waiting" | "started" | "submitted" | "failed" };
+    }
     if (event === "prepared_selected") {
       if (typeof message.reused !== "boolean") {
         throw new Error("Launcher browser helper prompt selection is invalid");
@@ -498,6 +505,7 @@ export class LauncherBrowserHelperClient {
         ));
       }
       else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      else if (message.event === "delivery_retry_state") pending.turn.onDeliveryRetryState?.(message.state);
       else if (message.event === "multipart_stage_acknowledged") {
         const multipart = pending.prepared?.multipart;
         if (!multipart

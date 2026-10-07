@@ -23,6 +23,28 @@ describe("real model progress watchdog", () => {
     expect(watchdog.failure(progress.snapshot(), 549)).toBeUndefined();
     expect(watchdog.failure(progress.snapshot(), 550)?.code).toBe("chatgpt_model_no_progress");
   });
+  test("delivery Retry settles under its own bounded clock and does not invent output", () => {
+    const watchdog = new ChatGptModelProgressWatchdog(300);
+    watchdog.start(0);
+    watchdog.beginDeliveryRetry(290);
+    expect(watchdog.failure(undefined, 400)).toBeUndefined();
+    watchdog.endDeliveryRetry(true, 500);
+    expect(watchdog.outputCount).toBe(0);
+    expect(watchdog.failure(undefined, 799)).toBeUndefined();
+    expect(watchdog.failure(undefined, 800)?.code).toBe("chatgpt_model_no_progress");
+  });
+  test("failed or permanently stuck Retry cannot extend the original inactivity budget", () => {
+    const watchdog = new ChatGptModelProgressWatchdog(300);
+    watchdog.start(0);
+    watchdog.beginDeliveryRetry(290);
+    watchdog.endDeliveryRetry(false, 500);
+    expect(watchdog.failure(undefined, 500)?.code).toBe("chatgpt_model_no_progress");
+    watchdog.beginDeliveryRetry(500);
+    watchdog.beginDeliveryRetry(30_000); // duplicate lifecycle evidence cannot extend the action
+    expect(watchdog.failure(undefined, 30_499)).toBeUndefined();
+    expect(watchdog.failure(undefined, 30_500)?.code).toBe("chatgpt_model_no_progress");
+    expect(watchdog.outputCount).toBe(0);
+  });
   test("parallel long tools suspend the budget until the last returned result", () => {
     const watchdog = new ChatGptModelProgressWatchdog(300);
     const progress = new ChatGptExternalTurnProgress();
@@ -34,6 +56,16 @@ describe("real model progress watchdog", () => {
     progress.recordToolResult(200_100);
     expect(watchdog.failure(progress.snapshot(), 200_399)).toBeUndefined();
     expect(watchdog.failure(progress.snapshot(), 200_400)?.code).toBe("chatgpt_model_no_progress");
+  });
+  test("Retry hydration is bounded independently and repeated UI snapshots cannot prolong it", () => {
+    const watchdog = new ChatGptModelProgressWatchdog(300);
+    watchdog.start(0);
+    watchdog.waitForDeliveryRetry(290);
+    watchdog.waitForDeliveryRetry(120_000);
+    watchdog.beginDeliveryRetry(120_000);
+    expect(watchdog.failure(undefined, 120_289)).toBeUndefined();
+    expect(watchdog.failure(undefined, 120_290)?.code).toBe("chatgpt_model_no_progress");
+    expect(watchdog.outputCount).toBe(0);
   });
   test("retirement revisions do not invent new model activity", () => {
     const watchdog = new ChatGptModelProgressWatchdog(300);
