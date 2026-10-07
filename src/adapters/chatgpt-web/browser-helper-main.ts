@@ -426,7 +426,7 @@ input.on("line", line => {
       abortControllers.get(message.id)?.abort();
       return;
     }
-    try { validateSkillFiles(prepared.skillFiles); }
+    try { validateSkillFiles(prepared.skillFiles); validateSkillFiles(prepared.contextFiles); }
     catch (error) {
       writeProtocol({ type: "error", id: message.id, message: error instanceof Error ? error.message : String(error) });
       abortControllers.get(message.id)?.abort();
@@ -554,4 +554,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "skill-attachments"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "skill-attachments", "compaction-file"] });

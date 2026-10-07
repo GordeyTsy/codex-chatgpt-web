@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
-import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
+import { defaultBrokerEndpoint, expandUserPath, getConfigDir, resolveBrokerEndpoint } from "../../config";
+import { CompactionFallbackPolicy, isCompactionTransportFailure } from "./compaction-fallback";
+import { validateCompactionFileAnswer, type CompactionFileManifest } from "./compaction-file";
 import {
   cancelLauncherManualTurn,
   endLauncherManualTurn,
@@ -394,6 +396,10 @@ export function createChatGptWebAdapter(
     && provider.chatgptWeb.browserHostDescriptorPath
       ? resolve(expandUserPath(provider.chatgptWeb.browserHostDescriptorPath))
       : undefined;
+  const compactionFallback = new CompactionFallbackPolicy(
+    retainedLauncherDescriptor ? join(dirname(retainedLauncherDescriptor), "compaction-fallback.json")
+      : join(getConfigDir(), "runtime", "compaction-fallback.json"), retainedLauncherDescriptor ?? executionNamespace,
+  );
   if (manualInteraction) {
     if (!configuredCapabilities.localToolsEnabled) {
       throw new Error("ChatGPT Zero Risk requires the Full Codex harness");
@@ -460,9 +466,12 @@ export function createChatGptWebAdapter(
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
       }
       : undefined;
+    let fileCompaction = !!parsed._compactionRequest && !manualRequest && compactionFallback.active();
+    let fileManifest: CompactionFileManifest | undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
       input = effectiveInput(input);
       if (manualRequest) return {};
+      if (fileCompaction) return { fileCompaction: true };
       const experimentalMultipartParts = experimentalBiggerContext
         ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments)
         : undefined;
@@ -546,11 +555,31 @@ export function createChatGptWebAdapter(
           try {
             const answer = await turn.browser;
             hooks.onCompactionProgress?.();
+            if (fileCompaction) {
+              if (!fileManifest) throw new Error("File compaction manifest is missing");
+              const summary = validateCompactionFileAnswer(answer, fileManifest);
+              console.info(`[chatgpt-web] compaction_file_verified trace=${traceId} sections=6 summaryChars=${summary.length}`);
+              text.push(summary);
+              return summary;
+            }
+            if (parsed._compactionRequest) text.push(answer);
             return prefix + answer;
           }
           catch (error) {
             clearInterval(interval);
             currentAttemptCancel = undefined;
+            if (parsed._compactionRequest && !manualRequest && !fileCompaction
+              && !browserAbort.signal.aborted && isCompactionTransportFailure(error)) {
+              const until = compactionFallback.activate(error);
+              hooks.onCompactionProgress?.();
+              await turn.physicalSettlement;
+              fileCompaction = true;
+              text.reset("");
+              trace.reset();
+              console.warn(`[chatgpt-web] compaction_file_fallback trace=${traceId} until=${new Date(until).toISOString()} code=${(error as ChatGptWebAdapterError).code}`);
+              continue;
+            }
+            if (fileCompaction && isCompactionTransportFailure(error)) throw error;
             if (error instanceof ChatGptWebAdapterError && error.code === "chatgpt_safety_recovery") {
               text.reset(prefix);
               trace.reset();
@@ -836,25 +865,20 @@ export function createChatGptWebAdapter(
       };
     }
     if (!mode.localTools) {
-      prepareRecovery = async () => ({
-        ...compileChatGptWebPrompt(savedRecoveryInput(), turnCapabilities, undefined, compileOptionsFor(recoveryInput)),
-        release: () => {},
-      });
+      const prepareReadOnly = async (input: CodexParsedRequest) => {
+        const compiled = compileChatGptWebPrompt(input, turnCapabilities, undefined, compileOptionsFor(input));
+        fileManifest = compiled.compactionFile;
+        if (fileManifest) console.info(`[chatgpt-web] compaction_file_prepared trace=${traceId} sections=6 archiveBytes=${Buffer.byteLength(compiled.contextFiles![0]!.text, "utf8")}`);
+        return { ...compiled, release: () => {} };
+      };
+      prepareRecovery = () => prepareReadOnly(parsed._compactionRequest ? checkpointInput.parsed : savedRecoveryInput());
       const browserTurn = superviseBrowser({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
         capabilities: turnCapabilities,
-        prepare: async () => ({
-          ...compileChatGptWebPrompt(
-            checkpointInput.parsed,
-            turnCapabilities,
-            undefined,
-            compileOptionsFor(checkpointInput.parsed),
-          ),
-          release: () => {},
-        }),
+        prepare: () => prepareReadOnly(checkpointInput.parsed),
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
@@ -867,7 +891,11 @@ export function createChatGptWebAdapter(
           modelProgress.recordOutput(text);
           trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) });
         },
-        onTextDelta: delta => { modelProgress.recordOutput(delta); text.push(delta); },
+        onTextDelta: delta => {
+          modelProgress.recordOutput(delta);
+          // Compaction is atomic. Do not leak raw receipt JSON or failed-attempt prefixes.
+          if (!parsed._compactionRequest) text.push(delta);
+        },
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
@@ -1238,7 +1266,7 @@ export function createChatGptWebAdapter(
                   let source: ChatGptTurnSession | undefined;
                   let preserveFinalResponse = false;
                   try {
-                    if (freshConversationPerTurn) {
+                    if (freshConversationPerTurn || (!manualRequest && compactionFallback.active())) {
                       // Full native history is the compaction input. Release an unfinished
                       // browser/tool owner before rebuilding it, but keep a committed final
                       // replayable if it won the native compaction race.
@@ -1375,6 +1403,10 @@ export function createChatGptWebAdapter(
                     if (handoffError instanceof ChatGptWebAdapterError
                       && handoffError.code === "compaction_source_unavailable") {
                       return await runFreshCompaction("source_disappeared_before_handoff");
+                    }
+                    if (!manualRequest && !operatorSignal.aborted && isCompactionTransportFailure(handoffError)) {
+                      compactionFallback.activate(handoffError);
+                      return await runFreshCompaction("retained_compaction_transport_failure");
                     }
                     throw handoffError;
                   } finally {

@@ -1542,9 +1542,15 @@ test("fresh compaction recovers model inactivity inside its logical turn", async
     expect(turn.compaction).toBeTrue();
     expect(turn.capabilities.localToolsEnabled).toBeFalse();
     expect(turn.requireRetainedConversation).toBeFalse();
-    expect((await turn.prepare()).text).toContain("Original task");
-    turn.onTextDelta("Recovered complete checkpoint");
-    return "Recovered complete checkpoint";
+    const prepared = await turn.prepare();
+    expect(prepared.multipart).toBeUndefined();
+    expect([...prepared.contextFiles![0]!.text.matchAll(/READ_START_CHECK=[a-f0-9]+\n([\s\S]*?)\nREAD_END_CHECK=[a-f0-9]+/g)].map(m => m[1]).join("")).toContain("Original task");
+    expect(prepared.compactionFile!.sections).toHaveLength(6);
+    const answer = JSON.stringify({ archive_sha256: prepared.compactionFile!.archiveSha256,
+      coverage: prepared.compactionFile!.sections.map(s => ({ index: s.index, start_check: s.startCheck, end_check: s.endCheck })),
+      summary: "Recovered complete checkpoint. Original task, ownership, completed effects, unresolved findings and exact next steps remain preserved." });
+    turn.onTextDelta(answer);
+    return answer;
   };
   const events: AdapterEvent[] = [];
   try {
@@ -1715,7 +1721,8 @@ test.each([false, true])("structured compact rebuild after retained browser loss
     browserStarts += 1;
     if (turn.requireRetainedConversation) throw chatGptRetainedConversationUnavailableError();
     const prepared = await turn.prepare();
-    expect(prepared.text).toContain("Original task");
+    expect(prepared.contextFiles ? [...prepared.contextFiles[0]!.text.matchAll(/READ_START_CHECK=[a-f0-9]+\n([\s\S]*?)\nREAD_END_CHECK=[a-f0-9]+/g)].map(m => m[1]).join("") : prepared.text).toContain("Original task");
+    if (browserStarts === 3) expect(prepared.compactionFile!.sections).toHaveLength(6);
     prepared.release();
     if (rateLimited) throw new ChatGptWebAdapterError("ChatGPT rate limit: too many requests.", {
       status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
@@ -1729,7 +1736,7 @@ test.each([false, true])("structured compact rebuild after retained browser loss
       { headers: new Headers() },
       event => events.push(event),
     );
-    expect(browserStarts).toBe(2);
+    expect(browserStarts).toBe(rateLimited ? 3 : 2);
     if (rateLimited) {
       expect(events.at(-1)).toMatchObject({
         type: "error", status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded",

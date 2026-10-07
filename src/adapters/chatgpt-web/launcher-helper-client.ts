@@ -538,6 +538,9 @@ export class LauncherBrowserHelperClient {
           if (prepared.skillFiles?.length && !this.helperFeatures.has("skill-attachments")) {
             throw new Error("Launcher browser helper does not support skill attachments; update or restart the launcher");
           }
+          if (prepared.contextFiles?.length && !this.helperFeatures.has("compaction-file")) {
+            throw new Error("Launcher browser helper does not support file compaction; update or restart the launcher");
+          }
           return Promise.resolve(pending.turn.onPreparedSelected?.(message.reused)).then(() => {
             if (this.pending.get(message.id) !== pending) return;
             return this.send({
@@ -547,6 +550,7 @@ export class LauncherBrowserHelperClient {
                 text: prepared.text,
                 images: prepared.images,
                 ...(prepared.skillFiles ? { skillFiles: prepared.skillFiles } : {}),
+                ...(prepared.contextFiles ? { contextFiles: prepared.contextFiles } : {}),
                 ...(prepared.multipart ? { multipart: prepared.multipart } : {}),
                 ...(prepared.trimmedCompactionMessages !== undefined
                   ? { trimmedCompactionMessages: prepared.trimmedCompactionMessages }

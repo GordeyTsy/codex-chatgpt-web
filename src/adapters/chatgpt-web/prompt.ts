@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { buildCompactionFile, type CompactionFileManifest } from "./compaction-file";
 import { selectedSkillFile, skillFileTokens, type ChatGptSkillFile } from "./skill-attachments";
 import {
   chatGptWebImageTokenReserve,
@@ -26,6 +27,9 @@ export interface CompiledChatGptWebPrompt {
   text: string;
   images: ChatGptWebPromptImage[];
   skillFiles?: ChatGptSkillFile[];
+  /** History archive for compact-only native file inspection; never skill instructions. */
+  contextFiles?: ChatGptSkillFile[];
+  compactionFile?: CompactionFileManifest;
   /** Transactional transport when Bigger Context is explicitly enabled. */
   multipart?: ChatGptWebMultipartPrompt;
   /** Oldest history items removed by native-style compaction fit recovery; absent on normal turns. */
@@ -36,6 +40,7 @@ export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
+  fileCompaction?: boolean;
   /**
    * Manual Zero Risk transport keeps ChatGPT model/effort selection and prompt submission under the
    * user's control. The browser bridge may open the owned tab and copy this prompt, but it never
@@ -443,6 +448,9 @@ export function compileChatGptWebPrompt(
     : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
   const multipartParts = options?.experimentalMultipartParts;
+  if (options?.fileCompaction && (!parsed._compactionRequest || manualControl || multipartParts !== undefined)) {
+    throw new Error("File compaction requires an automatic isolated compaction without multipart transport");
+  }
   const multipartEnabled = multipartParts !== undefined;
   if (manualControl) {
     if (!capabilities.localToolsEnabled) {
@@ -615,6 +623,14 @@ export function compileChatGptWebPrompt(
     const answerContract = captureLunaCheckpoint
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
       : "Return only the answer that the outer Codex task should receive.";
+    if (options?.fileCompaction) {
+      // Keep skills and every history item in their original positions inside one complete archive.
+      const archiveImages: ChatGptWebPromptImage[] = [];
+      const archiveBudget: ImageBudget = { seen: 0, dropped: Math.max(0, countChatGptContextImages(sourceMessages) - (CHATGPT_MAX_INPUT_IMAGES - 1)) };
+      const completeMessages = sourceMessages.map(message => messageEnvelope(message, archiveImages, archiveBudget));
+      const archive = buildCompactionFile(withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages: completeMessages })));
+      return { text: archive.prompt, images: archiveImages, contextFiles: [archive.file], compactionFile: archive.manifest };
+    }
     if (multipartEnabled) {
       const records: MultipartContextRecord[] = [
         ...system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
@@ -704,7 +720,7 @@ export function compileChatGptWebPrompt(
   // as ordinary multipart turns in browser-worker. Applying the legacy byte cap here silently
   // discarded context that the staged transport can carry; preserve it and let browser preflight
   // fail explicitly if any atomic record is genuinely too large for one stage.
-  if (compiled.multipart) return compiled;
+  if (compiled.multipart || compiled.compactionFile) return compiled;
 
   const exceedsCompactionBudget = (): boolean => (
     chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET

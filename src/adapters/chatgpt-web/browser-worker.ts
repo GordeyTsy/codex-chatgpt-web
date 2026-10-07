@@ -2252,20 +2252,21 @@ export function chatGptImageFilePayloads(images: ChatGptWebPromptImage[]): Array
 }
 
 function assertChatGptPromptAttachments(prompt: CompiledChatGptWebPrompt): void {
-  if (prompt.images.length + (prompt.skillFiles?.length ?? 0) > CHATGPT_MAX_INPUT_IMAGES) {
+  if (prompt.images.length + (prompt.skillFiles?.length ?? 0) + (prompt.contextFiles?.length ?? 0) > CHATGPT_MAX_INPUT_IMAGES) {
     throw new ChatGptWebAdapterError(
       "Selected skills and images exceed ChatGPT's 10 attachments per message; disable Skills as files or reduce attachments.",
       { status: 400, errorType: "invalid_request_error", code: "too_many_attachments", retryable: false },
     );
   }
   validateSkillFiles(prompt.skillFiles);
+  validateSkillFiles(prompt.contextFiles);
 }
 
 export function chatGptPromptFilePayloads(
   prompt: CompiledChatGptWebPrompt,
 ): Array<{ name: string; mimeType: string; buffer: Buffer }> {
   assertChatGptPromptAttachments(prompt);
-  const files = [...chatGptImageFilePayloads(prompt.images), ...(prompt.skillFiles ?? []).map(file => ({
+  const files = [...chatGptImageFilePayloads(prompt.images), ...[...(prompt.skillFiles ?? []), ...(prompt.contextFiles ?? [])].map(file => ({
     name: file.name, mimeType: "text/plain", buffer: Buffer.from(file.text, "utf8"),
   }))];
   if (files.reduce((sum, file) => sum + file.buffer.length, 0) > 50_000_000) {
