@@ -58,6 +58,24 @@ def daemon_request(config, action=None):
         raise
 
 
+def is_owned_browser_helper(pid, executable, config, health):
+    # Electron runs the browser helper as Node using the launcher executable.
+    # Recognize only its exact script AND its live daemon parent, never all children
+    # or arbitrary arguments sharing that executable.
+    runtime = config.get('runtimeCommand') if config else None
+    daemon_pid = health.get('pid') if health else None
+    if not isinstance(runtime, list) or len(runtime) != 2 or not isinstance(runtime[1], str) \
+            or not Path(runtime[1]).is_absolute() or type(daemon_pid) is not int or daemon_pid <= 0:
+        return False
+    helper = str(Path(runtime[1]).with_name('browser-helper.cjs'))
+    try:
+        if run('ps', '-p', str(pid), '-o', 'args=') != executable + ' ' + helper:
+            return False
+        return run('ps', '-p', str(pid), '-o', 'ppid=') == str(daemon_pid)
+    except subprocess.CalledProcessError:
+        return False
+
+
 def stop_owned(target, core):
     descriptor = core / 'runtime/launcher-browser.json'
     config_path = core / 'config.json'
@@ -69,7 +87,9 @@ def stop_owned(target, core):
     for row in run('ps', '-axo', 'pid=,uid=,comm=').splitlines():
         fields = row.strip().split(None, 2)
         if len(fields) == 3 and fields[1] == str(os.getuid()) and fields[2] == expected:
-            matches.append(int(fields[0]))
+            candidate = int(fields[0])
+            if not is_owned_browser_helper(candidate, expected, config, health):
+                matches.append(candidate)
     if len(matches) > 1:
         raise RuntimeError('Multiple matching launcher owners; refusing to guess')
     pid = matches[0] if matches else None
