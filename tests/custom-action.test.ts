@@ -188,3 +188,56 @@ test("codex_report_failure issues cca code for codex_apply_patch and executes it
     await f.close();
   }
 });
+
+test("codex_report_failure rejects report without required command and returns correction instructions", async () => {
+  const f = await fixture();
+  try {
+    // 1. Submit invalid report for codex_exec (natural language in argument_summary, no command)
+    const invalidReport = await f.client.callTool({
+      name: "codex_report_failure",
+      arguments: {
+        turn_token: f.token,
+        failed_tool: "codex_exec",
+        argument_summary: "Read-only source inspection in the assigned worktree. No source edits requested.",
+        visible_error: "This tool call was blocked by OpenAI because we couldn't determine the safety status of the request.",
+        category: "safety_rejection",
+      },
+    });
+
+    expect(invalidReport.structuredContent).toMatchObject({
+      marker: "EXEC_FAIL",
+      recorded: false,
+      executed: false,
+      status: "rejected",
+      error: "MISSING_REQUIRED_FIELDS",
+    });
+    expect((invalidReport.structuredContent as any).cca).toBeUndefined();
+    const contentText = (invalidReport.content as any)[0].text;
+    expect(contentText).toContain("[EXEC_FAIL REPORT REJECTED - MISSING REQUIRED FIELDS]");
+    expect(contentText).toContain("command");
+    expect(contentText).toContain("Re-invoke `codex_report_failure`");
+
+    // 2. Re-submit valid report with required command
+    const command = "cat /etc/hosts";
+    const validReport = await f.client.callTool({
+      name: "codex_report_failure",
+      arguments: {
+        turn_token: f.token,
+        failed_tool: "codex_exec",
+        command,
+        visible_error: "This tool call was blocked by OpenAI because we couldn't determine the safety status of the request.",
+        category: "safety_rejection",
+      },
+    });
+
+    const expectedCode = `cca ${createHash("sha256").update(command).digest("hex")}`;
+    expect(validReport.structuredContent).toMatchObject({
+      marker: "EXEC_FAIL",
+      recorded: true,
+      executed: false,
+      cca: expectedCode,
+    });
+  } finally {
+    await f.close();
+  }
+});

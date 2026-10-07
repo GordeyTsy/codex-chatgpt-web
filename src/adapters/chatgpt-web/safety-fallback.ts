@@ -47,9 +47,8 @@ export function customActionFromFallbackPayload(
   if (failedTool === "codex_exec") {
     const cmd = command
       || (typeof raw.cmd === "string" ? raw.cmd : undefined)
-      || (typeof args?.cmd === "string" ? args.cmd : undefined)
-      || argSummary;
-    if (cmd && cmd.trim().length > 0) return { tool: "codex_exec", command: cmd };
+      || (typeof args?.cmd === "string" ? args.cmd : undefined);
+    if (cmd && cmd.trim().length > 0) return { tool: "codex_exec", command: cmd.trim() };
   } else if (failedTool === "codex_apply_patch") {
     const patch = (typeof raw.patch === "string" ? raw.patch : undefined)
       || (typeof args?.patch === "string" ? args.patch : undefined)
