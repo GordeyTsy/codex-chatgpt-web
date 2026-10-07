@@ -112,7 +112,18 @@ bun scripts/test-macos-local.mjs
 bun scripts/test-macos-local.mjs --stress
 CHATGPT_DOM_TEST_BROWSER='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
   bun test tests/chatgpt-picker-matrix-browser.test.ts tests/chatgpt-model-family-browser.test.ts
+# Verify the installed Codex client's WEB catalog without sending model requests:
+bun run scripts/smoke-codex-catalog.ts \
+  '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex'
 ```
+
+The existing official ChatGPT application includes Codex CLI 0.160.1 at this
+nested path. Its native signature was verified; the official application was not
+replaced. The catalog smoke uses temporary client configuration, validates grouped
+models/efforts and V1 subagent overrides, then removes that temporary configuration.
+It accounts for the client's native models preceding the WEB entries while still
+requiring every primary WEB subagent route. Passing this smoke does not establish
+that the manually created MCP connector can execute a task.
 
 These fixtures send no real ChatGPT requests. Size labels in the inherited DOM
 fixture are not UTF-8 byte counts: use the measured `units` (UTF-16 code units).

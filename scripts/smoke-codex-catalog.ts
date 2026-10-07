@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -6,7 +6,9 @@ import { CHATGPT_WEB_MODEL_ROUTES, availableChatGptWebModelRoutes, chatGptWebRou
 import { defaultConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
-const codex = resolve(process.argv[2] ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
+const currentMacCodex = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
+const codex = resolve(process.argv[2] ?? (process.platform === "darwin" && existsSync(currentMacCodex)
+  ? currentMacCodex : "/Applications/ChatGPT.app/Contents/Resources/codex"));
 function runCodex(args: string[], env = process.env): { stdout: string; stderr: string } {
   const result = spawnSync(codex, args, {
     encoding: "utf8",
@@ -89,13 +91,26 @@ try {
     .toSorted((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER))
     .slice(0, 5)
     .map(model => model.slug);
+  const nativeRows = sourceCatalog.models as Array<{
+    slug: string; visibility: string; supported_in_api: boolean; priority?: number; supported_reasoning_levels?: unknown[];
+  }>;
+  const template = nativeRows.find(model => model.visibility === "list" && Array.isArray(model.supported_reasoning_levels));
+  if (!template) throw new Error("Native catalog has no visible reasoning template");
+  // The CLI's native catalog can add a model ahead of the first visible template
+  // (0.160.1 has 6.1 Sol ahead of Astra). Preserve every native row in that prefix.
+  const nativeLeaders = nativeRows
+    .filter(model => model.supported_in_api && model.visibility === "list"
+      && (model.priority ?? Number.MAX_SAFE_INTEGER) <= (template.priority ?? Number.MAX_SAFE_INTEGER))
+    .toSorted((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER));
+  const requiredWebOverrides = CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug);
   const expectedSpawnOverrides = [
-    (sourceCatalog.models as Array<{ slug: string; visibility: string; supported_in_api: boolean; priority?: number }>)
-      .filter(model => model.supported_in_api && model.visibility === "list")
-      .toSorted((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER))[0]?.slug,
+    ...nativeLeaders.map(model => model.slug),
     ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
     "chatgpt-web/gpt-5.6-sol-instant",
-  ];
+  ].slice(0, 5);
+  if (!requiredWebOverrides.every(slug => spawnOverrides.includes(slug))) {
+    throw new Error(`Native catalog displaced a required WEB subagent model: ${JSON.stringify(spawnOverrides)}`);
+  }
   if (JSON.stringify(spawnOverrides) !== JSON.stringify(expectedSpawnOverrides)) {
     throw new Error(`Codex did not preserve the bounded V1 subagent roster: ${JSON.stringify(spawnOverrides)}`);
   }
