@@ -7,6 +7,12 @@ preserved. The fallback lasts three hours from the first standard failure, inclu
 across daemon or Launcher restarts. File failures do not extend the expiry. At expiry,
 the next compact tries standard transport again.
 
+A confirmed current-exchange delivery-timeout card fails standard compaction
+immediately once generation and in-flight tools settle; it does not spend several
+delivery Retries before switching. A transient connection-interrupted indicator
+still waits for completed output or the model-progress timeout. Ordinary tasks and
+the file attempt retain their existing same-exchange delivery Retry handling.
+
 The runtime stores only a hashed browser-profile scope, expiry and failure code in
 `runtime/compaction-fallback.json`, with private file permissions. No history,
 credentials, account identifiers or summaries are persisted in that policy file.

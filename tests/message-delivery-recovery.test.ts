@@ -50,6 +50,32 @@ domTest("delivery Retry resumes the bound exchange without replacing its prior r
   });
 });
 
+domTest("standard compaction fails its first confirmed timeout without activating Retry", async () => {
+  for (const retryMounted of [true, false]) {
+    await withPage(async page => {
+      if (!retryMounted) await page.locator("aside button").evaluate(button => button.remove());
+      const scope = page.locator('[data-turn-key="current"]');
+      const recovery = new ChatGptMessageDeliveryRecovery("fail");
+      const first = await recovery.recover(scope).catch(error => error);
+      expect(first).toMatchObject({ code: "chatgpt_message_delivery_timeout" });
+      expect(await recovery.recover(scope).catch(error => error)).toBe(first);
+      expect(await page.evaluate(() => (window as any).deliveryRetryCount)).toBe(0);
+      expect(await scope.count()).toBe(1);
+    });
+  }
+});
+
+domTest("standard compaction preserves in-flight tools before switching transport", async () => {
+  await withPage(async page => {
+    const scope = page.locator('[data-turn-key="current"]');
+    const recovery = new ChatGptMessageDeliveryRecovery("fail");
+    expect(await recovery.recover(scope, { toolCallsInFlight: true, now: 1 })).toBe("waiting");
+    expect(await recovery.recover(scope, { toolCallsInFlight: false, now: 2 }).catch(error => error))
+      .toMatchObject({ code: "chatgpt_message_delivery_timeout" });
+    expect(await page.evaluate(() => (window as any).deliveryRetryCount)).toBe(0);
+  });
+});
+
 domTest("old, hidden and quoted timeout cards never trigger recovery", async () => {
   for (const scenario of ["old", "hidden", "markdown", "user", "other-error"]) {
     await withPage(async page => {
@@ -61,7 +87,9 @@ domTest("old, hidden and quoted timeout cards never trigger recovery", async () 
         if (scenario === "user") card.parentElement!.setAttribute("data-message-author-role", "user");
         if (scenario === "other-error") card.querySelector("div div")!.textContent = "An unrelated failure.";
       }, scenario);
-      expect(await new ChatGptMessageDeliveryRecovery().recover(page.locator('[data-turn-key="current"]'))).toBe("none");
+      for (const mode of ["retry", "fail"] as const) {
+        expect(await new ChatGptMessageDeliveryRecovery(mode).recover(page.locator('[data-turn-key="current"]'))).toBe("none");
+      }
       expect(await page.evaluate(() => (window as any).deliveryRetryCount)).toBe(0);
     });
   }

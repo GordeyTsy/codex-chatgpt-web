@@ -5527,7 +5527,11 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
-      const messageDeliveryRecovery = new ChatGptMessageDeliveryRecovery();
+      // Standard compaction delegates its first confirmed delivery failure to the
+      // logical-turn file fallback instead of repeating the multipart answer.
+      const messageDeliveryRecovery = new ChatGptMessageDeliveryRecovery(
+        turn.compaction && !prepared.contextFiles?.length ? "fail" : "retry",
+      );
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,

@@ -38,6 +38,7 @@ function checkAbort(signal?: AbortSignal): void {
  * This presses the card's delivery Retry action, not the response regeneration action.
  */
 export class ChatGptMessageDeliveryRecovery {
+  constructor(private readonly mode: "retry" | "fail" = "retry") {}
   private attempts = 0;
   private waitingSince?: number;
   private failed?: ChatGptWebAdapterError;
@@ -88,6 +89,11 @@ export class ChatGptMessageDeliveryRecovery {
     const running = await rendered(scope.page().locator(CHATGPT_STOP_BUTTON_SELECTOR).last());
     if (running || options.toolCallsInFlight) {
       return this.wait(options.now ?? Date.now(), options.onRetryState);
+    }
+    if (this.mode === "fail") {
+      options.onRetryState?.("failed");
+      this.failed = deliveryTimeoutError("Standard compaction delivery failed; switch the logical compact to file transport.");
+      throw this.failed;
     }
     if (this.attempts >= MAX_CHATGPT_WEB_TURN_RETRIES) {
       throw deliveryTimeoutError("The bounded bridge recovery attempts are exhausted; continue only unfinished work.");
