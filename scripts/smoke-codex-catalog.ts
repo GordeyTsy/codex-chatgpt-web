@@ -24,31 +24,31 @@ function runCodex(args: string[], env = process.env): { stdout: string; stderr: 
   return { stdout: result.stdout, stderr: result.stderr };
 }
 
-const bundled = runCodex(["debug", "models", "--bundled"]);
-const sourceCatalog = JSON.parse(bundled.stdout) as { models?: unknown[] };
-if (!sourceCatalog.models?.some(model => model && typeof model === "object" && (model as { slug?: string }).slug === "gpt-5.6-sol")) {
-  throw new Error("Bundled Codex catalog has no gpt-5.6-sol template");
-}
-
 const root = join(tmpdir(), `codex-chatgpt-web-codex-smoke-${process.pid}-${Date.now()}`);
 process.env.CODEX_HOME = join(root, "codex");
 process.env.CODEX_CHATGPT_WEB_HOME = join(root, "app");
 mkdirSync(process.env.CODEX_HOME, { recursive: true });
-const config = defaultConfig("browser-only");
-config.proAvailable = true;
-config.subagentProtocol = "compatibility-v1";
-const catalogPath = join(root, "augmented-models.json");
-writeFileSync(catalogPath, `${JSON.stringify(augmentNativeModelCatalog(sourceCatalog, config))}\n`);
-writeFileSync(join(process.env.CODEX_HOME, "config.toml"), [
-  `model_catalog_json = ${JSON.stringify(catalogPath)}`,
-  "",
-  "[features]",
-  "multi_agent = true",
-  "multi_agent_v2 = false",
-  "",
-].join("\n"));
 try {
-  const isolatedEnv = { ...process.env, CODEX_HOME: process.env.CODEX_HOME };
+  const isolatedEnv = { ...process.env };
+  // Isolate even the initial bundled catalog read from installed client hooks/config.
+  const bundled = runCodex(["debug", "models", "--bundled"], isolatedEnv);
+  const sourceCatalog = JSON.parse(bundled.stdout) as { models?: unknown[] };
+  if (!sourceCatalog.models?.some(model => model && typeof model === "object" && (model as { slug?: string }).slug === "gpt-5.6-sol")) {
+    throw new Error("Bundled Codex catalog has no gpt-5.6-sol template");
+  }
+  const config = defaultConfig("browser-only");
+  config.proAvailable = true;
+  config.subagentProtocol = "compatibility-v1";
+  const catalogPath = join(root, "augmented-models.json");
+  writeFileSync(catalogPath, `${JSON.stringify(augmentNativeModelCatalog(sourceCatalog, config))}\n`);
+  writeFileSync(join(process.env.CODEX_HOME, "config.toml"), [
+    `model_catalog_json = ${JSON.stringify(catalogPath)}`,
+    "",
+    "[features]",
+    "multi_agent = true",
+    "multi_agent_v2 = false",
+    "",
+  ].join("\n"));
   const result = runCodex(["debug", "models"], isolatedEnv);
   const catalog = JSON.parse(result.stdout) as {
     models?: Array<{
